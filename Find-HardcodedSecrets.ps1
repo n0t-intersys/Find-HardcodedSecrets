@@ -54,9 +54,19 @@
     Medium and High; hides Low / encrypted-config findings).
 
 .PARAMETER MaxRuntimeMinutes
-    Optional overall time budget. 0 = unlimited (default). When exceeded the scan
-    stops gracefully, reports partial results, and flags the run as TRUNCATED in
-    the summary. 30-45 is a reasonable cap for large hosts under a session timeout.
+    Time budget for the FILE scan, in minutes. Default: 10. When exceeded, the file
+    scan stops gracefully, partial results are reported, and the run is flagged
+    TRUNCATED in the summary.
+
+    This default is deliberate: Microsoft Defender Live Response returns a
+    command's output only when it COMPLETES, and it terminates long-running
+    commands -- an unbounded full-disk scan gets killed by the system and returns
+    NOTHING (the dreaded "Command canceled"). A bounded scan finishes and returns
+    what it found. The environment-variable scan runs FIRST and is effectively
+    instant, so those findings are captured regardless of this budget.
+
+    Set 0 for unlimited (only when NOT under a session timeout). Raise it if your
+    tenant allows longer Live Response commands and you want deeper file coverage.
 
 .PARAMETER IncludePlaceholders
     Switch. When set, disables placeholder/reference filtering (e.g. ${VAR},
@@ -114,7 +124,7 @@
       * Files are opened read-only with shared read/write access so the script
         does not lock files or block other processes.
 
-    Version : 1.3.0
+    Version : 1.4.0
     Author  : DFIR
 #>
 
@@ -142,7 +152,7 @@ param(
     [ValidateSet('High', 'Medium', 'Low')]
     [string]$MinConfidence = 'Medium',
 
-    [int]$MaxRuntimeMinutes = 0,
+    [int]$MaxRuntimeMinutes = 10,
 
     [switch]$IncludePlaceholders,
 
@@ -154,7 +164,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.3.0'
+$ScriptVersion = '1.4.0'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -268,6 +278,7 @@ $script:Stats = @{
     FilesScanned      = 0
     SkippedSize       = 0
     SkippedBinary     = 0
+    SkippedCloud      = 0
     FileErrors        = 0
     HashErrors        = 0
     FilesWithFindings = 0
@@ -457,6 +468,22 @@ function Invoke-FileScan {
 
     $script:Stats.CandidatesMatched++
     $path = $Item.FullName
+
+    # Skip cloud / offline placeholder files (e.g. OneDrive Files On-Demand,
+    # archival/HSM stubs). Opening one triggers HYDRATION -- an on-demand download
+    # from the cloud that can HANG the scan for a long time (the per-file time
+    # check cannot interrupt a blocked file-open) AND generate off-box network
+    # traffic, both unacceptable in Live Response. This is the most likely cause
+    # of a scan that runs for many minutes and is then killed by the system.
+    # Bits: Offline (0x1000), RecallOnOpen (0x40000), RecallOnDataAccess
+    # (0x400000). The latter two are not named in the .NET FileAttributes enum,
+    # so test the raw attribute value numerically.
+    $attrInt = 0
+    try { $attrInt = [int]$Item.Attributes } catch { $attrInt = 0 }
+    if (($attrInt -band 0x441000) -ne 0) {
+        $script:Stats.SkippedCloud++
+        return
+    }
 
     # Size guardrail.
     if ($Item.Length -gt $script:MaxFileSizeBytes) {
@@ -823,8 +850,8 @@ function Write-Summary {
     $truncated = $s.Truncated -or $script:TimeUp
 
     # Machine-parseable rollup.
-    Write-Output ("SUMMARY | candidatesMatched={0} | filesScanned={1} | skippedSize={2} | skippedBinary={3} | fileErrors={4} | dirErrors={5} | reparseSkipped={6} | hashErrors={7} | filesWithFindings={8} | envScopes={9} | envVars={10} | envVarsWithFindings={11} | totalFindings={12} | elapsedSec={13} | truncated={14}" -f `
-        $s.CandidatesMatched, $s.FilesScanned, $s.SkippedSize, $s.SkippedBinary, $s.FileErrors, `
+    Write-Output ("SUMMARY | candidatesMatched={0} | filesScanned={1} | skippedSize={2} | skippedBinary={3} | skippedCloud={4} | fileErrors={5} | dirErrors={6} | reparseSkipped={7} | hashErrors={8} | filesWithFindings={9} | envScopes={10} | envVars={11} | envVarsWithFindings={12} | totalFindings={13} | elapsedSec={14} | truncated={15}" -f `
+        $s.CandidatesMatched, $s.FilesScanned, $s.SkippedSize, $s.SkippedBinary, $s.SkippedCloud, $s.FileErrors, `
         $s.DirErrors, $s.ReparseSkipped, $s.HashErrors, $s.FilesWithFindings, `
         $s.EnvScopesScanned, $s.EnvVarsScanned, $s.EnvVarsWithFindings, $s.TotalFindings, `
         ([int]$ElapsedSeconds), $truncated)
@@ -844,6 +871,7 @@ function Write-Summary {
     Write-Output ("  Files content-scanned: {0}" -f $s.FilesScanned)
     Write-Output ("  Skipped (size)       : {0}" -f $s.SkippedSize)
     Write-Output ("  Skipped (binary)     : {0}" -f $s.SkippedBinary)
+    Write-Output ("  Skipped (cloud/offln): {0}" -f $s.SkippedCloud)
     Write-Output ("  File read errors     : {0}" -f $s.FileErrors)
     Write-Output ("  Directory errors     : {0}" -f $s.DirErrors)
     Write-Output ("  Reparse pts skipped  : {0}" -f $s.ReparseSkipped)
@@ -891,6 +919,19 @@ try {
     Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} envScanEnabled={4} aggressiveValueScan={5} dotNetIO={6} rules={7}" -f `
         $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, (-not $SkipEnvironment), $script:AggressiveValueScan, $script:UseDotNetIO, $script:Rules.Count)
 
+    # Environment-variable scan FIRST (registry-backed). It is fast and high-value
+    # (a common secret stash) and -- critically -- Live Response returns a
+    # command's output only when it COMPLETES, while a long file scan can hit the
+    # session/command time cap and be killed. Running env first guarantees these
+    # findings are produced even if the file scan is later truncated by the time
+    # budget. On by default; pass -SkipEnvironment for files-only.
+    if (-not $SkipEnvironment) {
+        Write-Meta 'env-scan-start'
+        Invoke-EnvScan
+        Write-Meta ("env-scan-end | scopes={0} vars={1} varsWithFindings={2}" -f `
+            $script:Stats.EnvScopesScanned, $script:Stats.EnvVarsScanned, $script:Stats.EnvVarsWithFindings)
+    }
+
     # Resolve roots to scan.
     $roots = @()
     if ($Drives -and $Drives.Count -gt 0) {
@@ -931,21 +972,9 @@ try {
             $root, $script:Stats.DirsTraversed, $script:Stats.TotalFindings)
         if ($script:TimeUp) {
             $script:Stats.Truncated = $true
-            Write-Meta 'runtime budget exceeded; stopping with partial results'
+            Write-Meta 'file-scan runtime budget exceeded; stopping with partial results'
             break
         }
-    }
-
-    # Environment-variable scan (registry-backed), after the file scan. Runs by
-    # DEFAULT (a common secret stash); pass -SkipEnvironment for files-only.
-    # Default-on matters because the Live Response 'run' command takes no
-    # arguments, so the zero-arg scan must already be the comprehensive one.
-    if (-not $SkipEnvironment -and -not $script:TimeUp) {
-        Write-Meta 'env-scan-start'
-        Invoke-EnvScan
-        Write-Meta ("env-scan-end | scopes={0} vars={1} varsWithFindings={2}" -f `
-            $script:Stats.EnvScopesScanned, $script:Stats.EnvVarsScanned, $script:Stats.EnvVarsWithFindings)
-        if ($script:TimeUp) { $script:Stats.Truncated = $true }
     }
 }
 catch {

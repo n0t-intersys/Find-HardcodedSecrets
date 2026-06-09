@@ -13,6 +13,16 @@ Built for the constrained Live Response shell: Windows PowerShell 5.1, tolerant 
 - **No persistence.** No registry writes, scheduled tasks, or elevation prompts.
 - Opens files read-only with shared read/write access, so it does not lock files or block other processes.
 
+## Live Response timeouts &amp; large / OneDrive hosts
+
+Defender Live Response returns a command's output **only when it completes**, and it **terminates** long-running commands — a killed command returns *nothing* (the "Command canceled" / "Terminated by system" result). To stay inside that window the scan:
+
+- Runs the **environment-variable sweep first** (fast, high-value), so those findings are captured even if the file scan is later cut short.
+- Bounds the **file** scan with `-MaxRuntimeMinutes` (**default 10**); when the budget is hit it stops cleanly, prints partial results, and sets `truncated=True`.
+- **Skips cloud / offline placeholder files** (OneDrive Files On-Demand, archival/HSM stubs — `Offline` / `RecallOnOpen` / `RecallOnDataAccess` attributes). Opening one would trigger **hydration** (a download that can hang the scan for many minutes *and* generate off-box traffic) — the most common cause of a scan that runs long and gets killed. These are counted as `skippedCloud`.
+
+So a bare, arg-less `run Find-HardcodedSecrets.ps1` completes and returns results even on a big, OneDrive-synced corporate endpoint.
+
 ## Requirements
 
 - Windows PowerShell **5.1** (the version available in Live Response). No PowerShell 7+ syntax is used.
@@ -62,7 +72,7 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 |---|---|---|
 | `-Drives` | all fixed drives | Drive letters (`C:`) and/or directory paths to scan |
 | `-MinConfidence` | `Medium` | `High` / `Medium` / `Low` (Low includes encrypted-config hits) |
-| `-MaxRuntimeMinutes` | `0` (unlimited) | Stops gracefully and flags `truncated=True` when exceeded (30–45 is sane for large hosts) |
+| `-MaxRuntimeMinutes` | `10` | Time budget for the **file** scan; stops gracefully and flags `truncated=True` when exceeded. `0` = unlimited (only when not under a session timeout) |
 | `-MaxFileSizeMB` | `10` | Skip files larger than this |
 | `-ExcludePaths` | surgical noise list | Path fragments to skip (keeps `C:\Windows` in scope so `machine.config`/`web.config` are scanned) |
 | `-IncludePlaceholders` | off | Stop filtering placeholders like `${VAR}`, `changeme`, `<your-secret>` |
