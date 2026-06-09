@@ -1,0 +1,19 @@
+# Claude Code local settings (machine-specific)
+.claude/
+
+# Never commit real credentials / secret material
+*.env
+.env
+.env.*
+secret.env
+*.pem
+*.key
+*.pfx
+*.p12
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
