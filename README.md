@@ -67,6 +67,7 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 | `-ExcludePaths` | surgical noise list | Path fragments to skip (keeps `C:\Windows` in scope so `machine.config`/`web.config` are scanned) |
 | `-IncludePlaceholders` | off | Stop filtering placeholders like `${VAR}`, `changeme`, `<your-secret>` |
 | `-SkipEnvironment` | off | Skip the environment-variable sweep (do a files-only scan) |
+| `-AggressiveValueScan` | off | Also flag high-entropy-looking *values* regardless of name (catches odd-named secrets; noisier) |
 
 ## Environment variables (on by default)
 
@@ -108,12 +109,16 @@ Plain text to stdout with stable, greppable line prefixes (no color/ANSI):
 
 A single, commented `$Rules` collection drives detection. Each rule has an `Id`, `Label`, regex `Pattern`, `Confidence`, and `Type`:
 
-- **Structured (High):** provider-specific formats — AWS access key IDs, Google API/OAuth, Slack, GitHub, GitLab, Stripe, SendGrid, Twilio, PEM/OpenSSH/PGP private-key blocks, JWTs, Azure storage `AccountKey`. The whole match is the token, so placeholder filtering is not applied.
+- **Structured (High):** provider-specific formats — AWS access key IDs, Google API/OAuth, Slack (tokens + webhook URLs), GitHub (classic + fine-grained PATs), GitLab, Stripe, SendGrid, Twilio (API key SID + Account SID), OpenAI/Anthropic, npm, Azure AD client secrets, Mailgun, PEM/OpenSSH/PGP private-key blocks, JWTs, Azure storage `AccountKey`, and **URLs with embedded credentials** (`scheme://user:pass@host`). The whole match is the token, so placeholder filtering is not applied.
 - **Contextual (Medium):** keyword = value assignments — `password`/`passwd`/`pwd`, `api_key`/`secret`/`token`/`access_key`/`auth_token`, and connection strings with embedded credentials. The captured value is run through a placeholder filter before recording.
 
 **False-positive reduction:** contextual values matching placeholders/references (`${VAR}`, `%VAR%`, `{{VAR}}`, `<your-secret>`, `changeme`, `example`, `xxxx`, etc.) are dropped unless `-IncludePlaceholders` is set. For `.config`, findings near a `configProtectionProvider` marker are downgraded to **Low** and relabeled "encrypted config section (value protected)".
 
 Add new rules by appending an entry to `$Rules` — nothing else needs to change.
+
+### Coverage vs. false positives
+
+Detection is **keyword-anchored** (known secret-ish names) **or** **format-anchored** (known provider tokens / credential-bearing URLs) — the standard low-false-positive model. It will *not*, by default, flag a secret hidden in an oddly-named variable whose value isn't a recognized format (e.g. `BRIVO_KEY=<random>`). For that, pass **`-AggressiveValueScan`**, which adds a heuristic that flags environment values that "look like" a random secret (length + character diversity + mixed character classes), skipping paths, GUIDs, and short/low-diversity values. It is deliberately noisier and reported at Medium as rule `ENV_HIGH_ENTROPY`. As always, the value itself is never emitted.
 
 ## License
 

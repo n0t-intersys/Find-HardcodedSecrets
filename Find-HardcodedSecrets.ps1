@@ -77,6 +77,15 @@
     NOTE: env scanning is ON by default precisely because the Live Response
     'run' command takes NO arguments; the zero-arg scan must be comprehensive.
 
+.PARAMETER AggressiveValueScan
+    Switch (OFF by default). Adds a heuristic that flags environment-variable
+    VALUES which "look like" a random secret (length + character diversity +
+    mixed classes) even when the variable NAME has no secret keyword and the
+    value is not a known provider format -- e.g. BRIVO_KEY=<random>. It skips
+    paths, GUIDs, short and low-diversity values, but is deliberately NOISIER
+    than the keyword/provider rules (expect more false positives). Reported at
+    Medium with rule id ENV_HIGH_ENTROPY. The value is still never emitted.
+
 .EXAMPLE
     Defender Live Response, zero arguments -- scans files AND environment
     variables by default. Works with the arg-less 'run' command:
@@ -105,7 +114,7 @@
       * Files are opened read-only with shared read/write access so the script
         does not lock files or block other processes.
 
-    Version : 1.2.0
+    Version : 1.3.0
     Author  : DFIR
 #>
 
@@ -137,13 +146,15 @@ param(
 
     [switch]$IncludePlaceholders,
 
-    [switch]$SkipEnvironment
+    [switch]$SkipEnvironment,
+
+    [switch]$AggressiveValueScan
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.2.0'
+$ScriptVersion = '1.3.0'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -191,6 +202,16 @@ $script:Rules = @(
     @{ Id = 'JWT';           Label = 'JSON Web Token';                    Pattern = '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'; CaseSensitive = $true; Confidence = 'High'; Type = 'Structured' }
     @{ Id = 'AZURE_STORAGE'; Label = 'Azure storage AccountKey';          Pattern = 'AccountKey=[A-Za-z0-9+/=]{40,}';                               CaseSensitive = $true;  Confidence = 'High'; Type = 'Structured' }
 
+    # -- Additional provider formats (broadened coverage). --
+    @{ Id = 'OPENAI_ANTHROPIC'; Label = 'OpenAI/Anthropic API key';        Pattern = '\bsk-(proj-|ant-)?[A-Za-z0-9_-]{20,}\b';                       CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'NPM_TOKEN';        Label = 'npm access token';                Pattern = '\bnpm_[A-Za-z0-9]{36}\b';                                      CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'GITHUB_FG_PAT';    Label = 'GitHub fine-grained PAT';         Pattern = '\bgithub_pat_[0-9A-Za-z_]{82}\b';                              CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'AZURE_AD_SECRET';  Label = 'Azure AD client secret';          Pattern = '\b[A-Za-z0-9_~.\-]{3}[78]Q~[A-Za-z0-9_~.\-]{31,34}\b';         CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'SLACK_WEBHOOK';    Label = 'Slack webhook URL';               Pattern = 'https://hooks\.slack\.com/services/[A-Za-z0-9/]+';             CaseSensitive = $false; Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'TWILIO_AC';        Label = 'Twilio Account SID';              Pattern = '\bAC[0-9a-f]{32}\b';                                           CaseSensitive = $true;  Confidence = 'Medium'; Type = 'Structured' }
+    @{ Id = 'MAILGUN_KEY';      Label = 'Mailgun API key';                 Pattern = '\bkey-[0-9a-f]{32}\b';                                         CaseSensitive = $true;  Confidence = 'Medium'; Type = 'Structured' }
+    @{ Id = 'URL_CRED';         Label = 'URL with embedded credentials';   Pattern = '(?i)[a-z][a-z0-9+.\-]*://[^:/?#\s@]+:[^@/?#\s]{2,}@';           CaseSensitive = $false; Confidence = 'High';   Type = 'Structured' }
+
     # -- Medium confidence: contextual keyword = value assignments. Higher FP
     #    risk, so the captured value is placeholder-filtered before recording.
     #    The value is captured but never printed. --
@@ -229,7 +250,11 @@ $script:PlaceholderPatterns = @(
 # *_USERNAME are not flagged. The variable VALUE is still placeholder-filtered
 # and never emitted.
 # ---------------------------------------------------------------------------
-$script:EnvNameKeywordPattern = '(?i)(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|auth[_-]?token|token|account[_-]?key|connection[_-]?string|connectionstring|private[_-]?key|credential)'
+# Distinctive keywords matched as a plain substring (low FP even unbounded).
+$script:EnvNameKeywordPattern = '(?i)(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|auth[_-]?token|token|account[_-]?key|connection[_-]?string|connectionstring|private[_-]?key|credential|passphrase|bearer|webhook|oauth)'
+# Short / ambiguous keywords matched ONLY as a delimited token (^, $, _ or -),
+# so 'key' does not hit PATH/MONKEY/KEYBOARD and 'pat' does not hit PATH.
+$script:EnvNameKeywordBounded = '(?i)(^|[_\-])(pwd|key|keys|cert|certificate|pat|dsn|sas|sig|signature|signing|privkey)([_\-]|$)'
 
 # Confidence ranking for -MinConfidence filtering.
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
@@ -263,6 +288,7 @@ $script:MaxFileSizeBytes    = [long]$MaxFileSizeMB * 1MB
 $script:MaxRuntimeMinutes   = $MaxRuntimeMinutes
 $script:ExcludePaths        = $ExcludePaths
 $script:IncludePlaceholders = [bool]$IncludePlaceholders
+$script:AggressiveValueScan = [bool]$AggressiveValueScan
 $script:MinRank             = $script:ConfRank[$MinConfidence]
 
 # ===========================================================================
@@ -338,6 +364,39 @@ function Test-IsPlaceholder {
         if ($Value -match $p) { return $true }
     }
     return $false
+}
+
+function Test-LooksLikeSecretValue {
+    # Heuristic used ONLY by -AggressiveValueScan: $true if a value "looks like" a
+    # random secret regardless of where it lives (catches secrets in oddly-named
+    # variables that no keyword/provider rule would match). Deliberately noisier
+    # than the other rules. CLM-safe: no [Math]/entropy maths -- just length,
+    # character-class checks, and distinct-character counting via a hashtable.
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $false }
+    if ($Value.Length -lt 20) { return $false }                 # too short to be a strong secret
+    if ($Value -match '\s')   { return $false }                 # whitespace -> prose/list, not a token
+    if ($Value -match '[\\/]') { return $false }                # path / URL -> handled elsewhere
+    # Canonical GUID -> identifier, not a secret (skip to cut obvious noise).
+    if ($Value -match '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$') { return $false }
+
+    $hasLower = $Value -cmatch '[a-z]'
+    $hasUpper = $Value -cmatch '[A-Z]'
+    $hasDigit = $Value -match  '[0-9]'
+    $hasSpec  = $Value -match  '[^A-Za-z0-9]'
+    $classes = 0
+    if ($hasLower) { $classes++ }
+    if ($hasUpper) { $classes++ }
+    if ($hasDigit) { $classes++ }
+    if ($hasSpec)  { $classes++ }
+    if ($classes -lt 2) { return $false }                       # not mixed enough
+    if (-not ($hasDigit -and ($hasLower -or $hasUpper))) { return $false }  # random tokens mix letters+digits
+
+    # Distinct-character count: repetitive strings (aaaa..., 0000...) are not secrets.
+    $seen = @{}
+    foreach ($ch in $Value.ToCharArray()) { $seen[$ch] = $true }
+    if ($seen.Keys.Count -lt 10) { return $false }
+    return $true
 }
 
 function Test-FileIsBinary {
@@ -714,8 +773,9 @@ function Invoke-EnvScan {
                 $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = $rule.Confidence; Length = ([string]$matches[0]).Length }
             }
 
-            # Pass B: secret-like NAME + non-placeholder value -> Medium.
-            if ($vname -match $script:EnvNameKeywordPattern) {
+            # Pass B: secret-like NAME (substring keywords OR delimited short
+            # keywords) + non-placeholder value -> Medium.
+            if (($vname -match $script:EnvNameKeywordPattern) -or ($vname -match $script:EnvNameKeywordBounded)) {
                 $isPlaceholder = $false
                 if (-not $script:IncludePlaceholders) { $isPlaceholder = Test-IsPlaceholder -Value $vval }
                 if ((-not $isPlaceholder) -and ($vval.Length -ge 4) -and ($script:ConfRank['Medium'] -ge $script:MinRank)) {
@@ -723,6 +783,17 @@ function Invoke-EnvScan {
                         $seen['ENV_NAMED_SECRET'] = $true
                         $varFindings += @{ RuleId = 'ENV_NAMED_SECRET'; Label = 'Secret-like environment variable'; Confidence = 'Medium'; Length = $vval.Length }
                     }
+                }
+            }
+
+            # Pass C (opt-in -AggressiveValueScan): high-entropy-looking value
+            # regardless of name. Only runs if nothing above already matched this
+            # variable, so it purely fills the "odd-named secret" gap.
+            if ($script:AggressiveValueScan -and ($varFindings.Count -eq 0)) {
+                $isPlaceholder = $false
+                if (-not $script:IncludePlaceholders) { $isPlaceholder = Test-IsPlaceholder -Value $vval }
+                if ((-not $isPlaceholder) -and ($script:ConfRank['Medium'] -ge $script:MinRank) -and (Test-LooksLikeSecretValue -Value $vval)) {
+                    $varFindings += @{ RuleId = 'ENV_HIGH_ENTROPY'; Label = 'High-entropy environment value (aggressive)'; Confidence = 'Medium'; Length = $vval.Length }
                 }
             }
 
@@ -817,8 +888,8 @@ $script:UseDotNetIO = ($langMode -eq 'FullLanguage')
 try {
     Write-Meta ("script=Find-HardcodedSecrets.ps1 version={0} host={1} startUtc={2} langMode={3}" -f `
         $ScriptVersion, $env:COMPUTERNAME, $startUtc, $langMode)
-    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} envScanEnabled={4} dotNetIO={5} rules={6}" -f `
-        $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, (-not $SkipEnvironment), $script:UseDotNetIO, $script:Rules.Count)
+    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} envScanEnabled={4} aggressiveValueScan={5} dotNetIO={6} rules={7}" -f `
+        $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, (-not $SkipEnvironment), $script:AggressiveValueScan, $script:UseDotNetIO, $script:Rules.Count)
 
     # Resolve roots to scan.
     $roots = @()
