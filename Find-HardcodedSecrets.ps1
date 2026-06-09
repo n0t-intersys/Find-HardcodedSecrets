@@ -62,24 +62,29 @@
     Switch. When set, disables placeholder/reference filtering (e.g. ${VAR},
     <your-secret>, changeme). Off by default so obvious non-secrets are ignored.
 
-.PARAMETER IncludeEnvironment
-    Switch. When set, ALSO scans environment variables for secrets, in addition
-    to the file scan. Environment variables live in the registry, not the file
-    system, so this reads (read-only):
-      * System scope  : HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment
-      * Each loaded user hive : HKU\<SID>\Environment
+.PARAMETER SkipEnvironment
+    Switch. By DEFAULT the scan ALSO covers environment variables (a common
+    secret stash) in addition to files. Environment variables live in the
+    registry, not the file system, so this reads (read-only):
+      * System scope          : HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment
+      * Each loaded user hive : HKU\<SID>\Environment (incl. Azure AD / Entra ID
+                                S-1-12-1-... SIDs)
     It reports the variable name + scope + value length only, NEVER the value.
-    Offline (logged-off) user hives are intentionally NOT mounted, because
-    'reg load' of an NTUSER.DAT is a registry write + file lock and would break
-    the read-only guarantee.
+    Pass -SkipEnvironment for a files-only scan. Offline (logged-off) user hives
+    are never mounted (that would be a registry write + file lock), so only
+    currently-loaded hives are read -- run while the target user is logged on.
+
+    NOTE: env scanning is ON by default precisely because the Live Response
+    'run' command takes NO arguments; the zero-arg scan must be comprehensive.
 
 .EXAMPLE
-    Defender Live Response (zero arguments, sensible defaults):
-        runscript -scriptName Find-HardcodedSecrets.ps1
+    Defender Live Response, zero arguments -- scans files AND environment
+    variables by default. Works with the arg-less 'run' command:
+        run Find-HardcodedSecrets.ps1
 
 .EXAMPLE
-    Files AND environment variables (registry-backed), high confidence:
-        runscript -scriptName Find-HardcodedSecrets.ps1 -args "-IncludeEnvironment -MinConfidence Medium"
+    Files-only scan (skip the environment-variable sweep), where args are usable:
+        runscript -scriptName Find-HardcodedSecrets.ps1 -args "-SkipEnvironment"
 
 .EXAMPLE
     Defender Live Response (high-confidence only, 30-minute budget):
@@ -100,7 +105,7 @@
       * Files are opened read-only with shared read/write access so the script
         does not lock files or block other processes.
 
-    Version : 1.1.0
+    Version : 1.2.0
     Author  : DFIR
 #>
 
@@ -132,13 +137,13 @@ param(
 
     [switch]$IncludePlaceholders,
 
-    [switch]$IncludeEnvironment
+    [switch]$SkipEnvironment
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.2.0'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -215,7 +220,7 @@ $script:PlaceholderPatterns = @(
 )
 
 # ---------------------------------------------------------------------------
-# Environment-variable NAME keywords (used only when -IncludeEnvironment).
+# Environment-variable NAME keywords (used by the env scan, on by default).
 #
 # Env var names embed the keyword after a prefix and an underscore
 # (e.g. BRIVO_API_KEY, DB_PASSWORD), so the file rules' word-boundary anchors
@@ -594,7 +599,7 @@ function Invoke-DirScan {
 }
 
 # ===========================================================================
-# Environment-variable scan (registry-backed; only when -IncludeEnvironment)
+# Environment-variable scan (registry-backed; on by default, -SkipEnvironment off)
 #
 # Read-only throughout: uses the registry PROVIDER cmdlets (Get-ItemProperty /
 # Get-ChildItem / Test-Path) and PSObject property enumeration rather than
@@ -812,8 +817,8 @@ $script:UseDotNetIO = ($langMode -eq 'FullLanguage')
 try {
     Write-Meta ("script=Find-HardcodedSecrets.ps1 version={0} host={1} startUtc={2} langMode={3}" -f `
         $ScriptVersion, $env:COMPUTERNAME, $startUtc, $langMode)
-    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} includeEnvironment={4} dotNetIO={5} rules={6}" -f `
-        $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, [bool]$IncludeEnvironment, $script:UseDotNetIO, $script:Rules.Count)
+    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} envScanEnabled={4} dotNetIO={5} rules={6}" -f `
+        $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, (-not $SkipEnvironment), $script:UseDotNetIO, $script:Rules.Count)
 
     # Resolve roots to scan.
     $roots = @()
@@ -860,8 +865,11 @@ try {
         }
     }
 
-    # Optional: environment-variable scan (registry-backed), after the file scan.
-    if ($IncludeEnvironment -and -not $script:TimeUp) {
+    # Environment-variable scan (registry-backed), after the file scan. Runs by
+    # DEFAULT (a common secret stash); pass -SkipEnvironment for files-only.
+    # Default-on matters because the Live Response 'run' command takes no
+    # arguments, so the zero-arg scan must already be the comprehensive one.
+    if (-not $SkipEnvironment -and -not $script:TimeUp) {
         Write-Meta 'env-scan-start'
         Invoke-EnvScan
         Write-Meta ("env-scan-end | scopes={0} vars={1} varsWithFindings={2}" -f `

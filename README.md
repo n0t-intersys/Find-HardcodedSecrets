@@ -32,9 +32,14 @@ runscript -scriptName Find-HardcodedSecrets.ps1 -args "-MinConfidence High -MaxR
 # Scope to one drive and include placeholder values
 runscript -scriptName Find-HardcodedSecrets.ps1 -args "-Drives C: -IncludePlaceholders"
 
-# Also scan environment variables (registry-backed), in addition to files
-runscript -scriptName Find-HardcodedSecrets.ps1 -args "-IncludeEnvironment -MinConfidence Medium"
+# Files-only (skip the environment-variable sweep)
+runscript -scriptName Find-HardcodedSecrets.ps1 -args "-SkipEnvironment"
 ```
+
+> The bare, arg-less `run Find-HardcodedSecrets.ps1` scans **files and environment
+> variables** — env scanning is on by default, because the Live Response `run`
+> command cannot pass arguments. Use `runscript … -args` only when you need a
+> non-default option (and only if your console supports it).
 
 Wait for the `SUMMARY |` line — that marks the end of the run. If `truncated=True`, the time budget was hit and results are partial; raise `-MaxRuntimeMinutes` and re-run.
 
@@ -61,11 +66,11 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 | `-MaxFileSizeMB` | `10` | Skip files larger than this |
 | `-ExcludePaths` | surgical noise list | Path fragments to skip (keeps `C:\Windows` in scope so `machine.config`/`web.config` are scanned) |
 | `-IncludePlaceholders` | off | Stop filtering placeholders like `${VAR}`, `changeme`, `<your-secret>` |
-| `-IncludeEnvironment` | off | Also scan environment variables (registry-backed) for secrets |
+| `-SkipEnvironment` | off | Skip the environment-variable sweep (do a files-only scan) |
 
-## Environment variables (`-IncludeEnvironment`)
+## Environment variables (on by default)
 
-Secrets are often stored in environment variables (e.g. `BRIVO_API_KEY`, `DB_PASSWORD`), which live in the **registry**, not the file system — so a file scan won't see them. With `-IncludeEnvironment` the tool additionally reads (read-only):
+Secrets are often stored in environment variables (e.g. `BRIVO_API_KEY`, `DB_PASSWORD`), which live in the **registry**, not the file system — so a file scan alone won't see them. Environment scanning therefore runs **by default** (pass `-SkipEnvironment` to turn it off). It reads (read-only):
 
 - **System** — `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
 - **Each loaded user hive** — `HKU\<SID>\Environment`, covering classic (`S-1-5-21-…`), service-account (`S-1-5-18/19/20`), and **Azure AD / Entra ID** (`S-1-12-1-…`) SIDs
