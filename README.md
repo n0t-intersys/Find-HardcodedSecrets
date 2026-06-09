@@ -31,6 +31,9 @@ runscript -scriptName Find-HardcodedSecrets.ps1 -args "-MinConfidence High -MaxR
 
 # Scope to one drive and include placeholder values
 runscript -scriptName Find-HardcodedSecrets.ps1 -args "-Drives C: -IncludePlaceholders"
+
+# Also scan environment variables (registry-backed), in addition to files
+runscript -scriptName Find-HardcodedSecrets.ps1 -args "-IncludeEnvironment -MinConfidence Medium"
 ```
 
 Wait for the `SUMMARY |` line — that marks the end of the run. If `truncated=True`, the time budget was hit and results are partial; raise `-MaxRuntimeMinutes` and re-run.
@@ -58,6 +61,23 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 | `-MaxFileSizeMB` | `10` | Skip files larger than this |
 | `-ExcludePaths` | surgical noise list | Path fragments to skip (keeps `C:\Windows` in scope so `machine.config`/`web.config` are scanned) |
 | `-IncludePlaceholders` | off | Stop filtering placeholders like `${VAR}`, `changeme`, `<your-secret>` |
+| `-IncludeEnvironment` | off | Also scan environment variables (registry-backed) for secrets |
+
+## Environment variables (`-IncludeEnvironment`)
+
+Secrets are often stored in environment variables (e.g. `BRIVO_API_KEY`, `DB_PASSWORD`), which live in the **registry**, not the file system — so a file scan won't see them. With `-IncludeEnvironment` the tool additionally reads (read-only):
+
+- **System** — `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`
+- **Each loaded user hive** — `HKU\<SID>\Environment`, covering classic (`S-1-5-21-…`), service-account (`S-1-5-18/19/20`), and **Azure AD / Entra ID** (`S-1-12-1-…`) SIDs
+
+Detection on each variable:
+
+- **Structured value rules (High):** the value is matched against the provider-format rules (AWS, GitHub, …).
+- **Secret-like name (Medium):** the variable *name* is matched as a substring against secret keywords (`password`, `secret`, `api_key`, `token`, …), with the value placeholder-filtered. This catches `*_API_KEY` / `*_PASSWORD` that the word-boundary file rules wouldn't.
+
+Findings reuse the `FINDING |` format with the location set to `ENV:<scope>::<VariableName>` and `line=0`. As everywhere, **only the name + scope + length are emitted — never the value**.
+
+> Read-only by design: offline (logged-off) user hives are **not** mounted, because `reg load` of an `NTUSER.DAT` is a registry write and file lock that would violate the read-only guarantee. Only already-loaded hives are read.
 
 ## File targeting
 

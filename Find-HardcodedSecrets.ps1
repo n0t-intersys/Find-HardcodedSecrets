@@ -62,9 +62,24 @@
     Switch. When set, disables placeholder/reference filtering (e.g. ${VAR},
     <your-secret>, changeme). Off by default so obvious non-secrets are ignored.
 
+.PARAMETER IncludeEnvironment
+    Switch. When set, ALSO scans environment variables for secrets, in addition
+    to the file scan. Environment variables live in the registry, not the file
+    system, so this reads (read-only):
+      * System scope  : HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment
+      * Each loaded user hive : HKU\<SID>\Environment
+    It reports the variable name + scope + value length only, NEVER the value.
+    Offline (logged-off) user hives are intentionally NOT mounted, because
+    'reg load' of an NTUSER.DAT is a registry write + file lock and would break
+    the read-only guarantee.
+
 .EXAMPLE
     Defender Live Response (zero arguments, sensible defaults):
         runscript -scriptName Find-HardcodedSecrets.ps1
+
+.EXAMPLE
+    Files AND environment variables (registry-backed), high confidence:
+        runscript -scriptName Find-HardcodedSecrets.ps1 -args "-IncludeEnvironment -MinConfidence Medium"
 
 .EXAMPLE
     Defender Live Response (high-confidence only, 30-minute budget):
@@ -85,7 +100,7 @@
       * Files are opened read-only with shared read/write access so the script
         does not lock files or block other processes.
 
-    Version : 1.0.0
+    Version : 1.1.0
     Author  : DFIR
 #>
 
@@ -115,13 +130,15 @@ param(
 
     [int]$MaxRuntimeMinutes = 0,
 
-    [switch]$IncludePlaceholders
+    [switch]$IncludePlaceholders,
+
+    [switch]$IncludeEnvironment
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -197,6 +214,18 @@ $script:PlaceholderPatterns = @(
     '#\{[^}]+\}'         # #{VAR}
 )
 
+# ---------------------------------------------------------------------------
+# Environment-variable NAME keywords (used only when -IncludeEnvironment).
+#
+# Env var names embed the keyword after a prefix and an underscore
+# (e.g. BRIVO_API_KEY, DB_PASSWORD), so the file rules' word-boundary anchors
+# (\bapi_key) would NOT match. Here we match the keyword as a SUBSTRING of the
+# name, case-insensitive. Kept tight so identifiers like *_CLIENT_ID and
+# *_USERNAME are not flagged. The variable VALUE is still placeholder-filtered
+# and never emitted.
+# ---------------------------------------------------------------------------
+$script:EnvNameKeywordPattern = '(?i)(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|auth[_-]?token|token|account[_-]?key|connection[_-]?string|connectionstring|private[_-]?key|credential)'
+
 # Confidence ranking for -MinConfidence filtering.
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
 
@@ -216,6 +245,9 @@ $script:Stats = @{
     ByConfidence      = @{}
     ByRule            = @{}
     Truncated         = $false
+    EnvScopesScanned     = 0
+    EnvVarsScanned       = 0
+    EnvVarsWithFindings  = 0
 }
 
 # Populated in main; read by the scanning functions.
@@ -562,6 +594,149 @@ function Invoke-DirScan {
 }
 
 # ===========================================================================
+# Environment-variable scan (registry-backed; only when -IncludeEnvironment)
+#
+# Read-only throughout: uses the registry PROVIDER cmdlets (Get-ItemProperty /
+# Get-ChildItem / Test-Path) and PSObject property enumeration rather than
+# RegistryKey methods, so it works under Constrained Language Mode (where method
+# calls on non-core .NET types such as RegistryKey are blocked). Values are used
+# only for matching / length and are NEVER emitted.
+# ===========================================================================
+
+function Resolve-UserScopeName {
+    # Map a user SID to a friendly name via the ProfileList (read-only), with
+    # well-known service-account fallbacks. Returns the SID if unresolved.
+    param([string]$Sid)
+    try {
+        $pp = Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\' + $Sid) -Name 'ProfileImagePath' -ErrorAction Stop
+        $path = [string]$pp.ProfileImagePath
+        if (-not [string]::IsNullOrEmpty($path)) { return (Split-Path -Leaf $path) }
+    }
+    catch { }
+    switch ($Sid) {
+        'S-1-5-18' { return 'SYSTEM' }
+        'S-1-5-19' { return 'LocalService' }
+        'S-1-5-20' { return 'NetworkService' }
+    }
+    return $Sid
+}
+
+function Get-EnvScope {
+    # Return the environment-variable scopes to read: System + every loaded user
+    # hive (HKU\<SID>\Environment). Each item: @{ Friendly; RegPath; Display }.
+    $scopes = @()
+    $scopes += @{
+        Friendly = 'System'
+        RegPath  = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+        Display  = 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+    }
+
+    # Enumerate loaded user hives. SilentlyContinue + per-hive try/catch is
+    # essential: HKEY_USERS contains protected hives (e.g. S-1-5-18) that raise
+    # "Requested registry access is not allowed" when not elevated; under the
+    # script's Stop preference that would otherwise abort the whole discovery.
+    $hives = @()
+    try { $hives = @(Get-ChildItem -LiteralPath 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue) }
+    catch { $hives = @() }
+
+    foreach ($k in $hives) {
+        try {
+            $sid = $k.PSChildName
+            if ($sid -like '*_Classes') { continue }   # COM/class hives, not user env
+            # Any user-hive SID: classic local/domain (S-1-5-21-...), built-in
+            # service accounts (S-1-5-18/19/20), AND Azure AD / Entra ID
+            # (S-1-12-1-...). Skips '.DEFAULT'. The Test-Path below drops hives
+            # with no Environment subkey (or that we cannot open).
+            if ($sid -notlike 'S-1-*') { continue }
+            $envPath = 'Registry::HKEY_USERS\' + $sid + '\Environment'
+            if (-not (Test-Path -LiteralPath $envPath -ErrorAction SilentlyContinue)) { continue }
+            $scopes += @{
+                Friendly = 'User:' + (Resolve-UserScopeName -Sid $sid)
+                RegPath  = $envPath
+                Display  = 'HKU\' + $sid + '\Environment'
+            }
+        }
+        catch {
+            # Inaccessible / protected hive -- skip and keep going.
+            $script:Stats.DirErrors++
+            continue
+        }
+    }
+    return $scopes
+}
+
+function Invoke-EnvScan {
+    # Scan environment variables across all scopes. Emits FINDING lines using the
+    # same format as the file scan, with the location being the variable name and
+    # scope (never the value).
+    $scopes = Get-EnvScope
+    foreach ($s in $scopes) {
+        if ($script:TimeUp) { return }
+        if (Test-TimeUp) { $script:TimeUp = $true; return }
+
+        $script:Stats.EnvScopesScanned++
+        Write-Meta ("env-scope | {0} | {1}" -f $s.Friendly, $s.Display)
+
+        $ip = $null
+        try { $ip = Get-ItemProperty -LiteralPath $s.RegPath -ErrorAction Stop }
+        catch {
+            $script:Stats.DirErrors++
+            Write-ErrLine ("env-scope-read | {0}" -f $s.Display)
+            continue
+        }
+
+        foreach ($prop in $ip.PSObject.Properties) {
+            $vname = $prop.Name
+            if ($vname -like 'PS*') { continue }   # provider noise: PSPath, PSParentPath, ...
+            $script:Stats.EnvVarsScanned++
+
+            $vval = ''
+            if ($null -ne $prop.Value) { $vval = [string]$prop.Value }
+            if ([string]::IsNullOrEmpty($vval)) { continue }
+
+            $varFindings = @()
+            $seen = @{}
+
+            # Pass A: structured provider-format rules against the VALUE -> High.
+            foreach ($rule in $script:Rules) {
+                if ($rule.Type -ne 'Structured') { continue }
+                if ($rule.CaseSensitive) { $isMatch = $vval -cmatch $rule.Pattern }
+                else                     { $isMatch = $vval -match  $rule.Pattern }
+                if (-not $isMatch) { continue }
+                if ($seen.ContainsKey($rule.Id)) { continue }
+                if ($script:ConfRank[$rule.Confidence] -lt $script:MinRank) { continue }
+                $seen[$rule.Id] = $true
+                $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = $rule.Confidence; Length = ([string]$matches[0]).Length }
+            }
+
+            # Pass B: secret-like NAME + non-placeholder value -> Medium.
+            if ($vname -match $script:EnvNameKeywordPattern) {
+                $isPlaceholder = $false
+                if (-not $script:IncludePlaceholders) { $isPlaceholder = Test-IsPlaceholder -Value $vval }
+                if ((-not $isPlaceholder) -and ($vval.Length -ge 4) -and ($script:ConfRank['Medium'] -ge $script:MinRank)) {
+                    if (-not $seen.ContainsKey('ENV_NAMED_SECRET')) {
+                        $seen['ENV_NAMED_SECRET'] = $true
+                        $varFindings += @{ RuleId = 'ENV_NAMED_SECRET'; Label = 'Secret-like environment variable'; Confidence = 'Medium'; Length = $vval.Length }
+                    }
+                }
+            }
+
+            if ($varFindings.Count -eq 0) { continue }
+
+            $script:Stats.EnvVarsWithFindings++
+            $loc = 'ENV:' + $s.Friendly + '::' + $vname
+            foreach ($f in $varFindings) {
+                # Line=0: env vars have no line number. Location carries scope+name.
+                Write-FindingLine -Confidence $f.Confidence -RuleId $f.RuleId -Label $f.Label -Line 0 -Length $f.Length -Path $loc
+                $script:Stats.TotalFindings++
+                Add-Count $script:Stats.ByConfidence $f.Confidence
+                Add-Count $script:Stats.ByRule $f.Label
+            }
+        }
+    }
+}
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 
@@ -572,9 +747,10 @@ function Write-Summary {
     $truncated = $s.Truncated -or $script:TimeUp
 
     # Machine-parseable rollup.
-    Write-Output ("SUMMARY | candidatesMatched={0} | filesScanned={1} | skippedSize={2} | skippedBinary={3} | fileErrors={4} | dirErrors={5} | reparseSkipped={6} | hashErrors={7} | filesWithFindings={8} | totalFindings={9} | elapsedSec={10} | truncated={11}" -f `
+    Write-Output ("SUMMARY | candidatesMatched={0} | filesScanned={1} | skippedSize={2} | skippedBinary={3} | fileErrors={4} | dirErrors={5} | reparseSkipped={6} | hashErrors={7} | filesWithFindings={8} | envScopes={9} | envVars={10} | envVarsWithFindings={11} | totalFindings={12} | elapsedSec={13} | truncated={14}" -f `
         $s.CandidatesMatched, $s.FilesScanned, $s.SkippedSize, $s.SkippedBinary, $s.FileErrors, `
-        $s.DirErrors, $s.ReparseSkipped, $s.HashErrors, $s.FilesWithFindings, $s.TotalFindings, `
+        $s.DirErrors, $s.ReparseSkipped, $s.HashErrors, $s.FilesWithFindings, `
+        $s.EnvScopesScanned, $s.EnvVarsScanned, $s.EnvVarsWithFindings, $s.TotalFindings, `
         ([int]$ElapsedSeconds), $truncated)
 
     foreach ($k in ($s.ByConfidence.Keys | Sort-Object)) {
@@ -597,6 +773,11 @@ function Write-Summary {
     Write-Output ("  Reparse pts skipped  : {0}" -f $s.ReparseSkipped)
     Write-Output ("  Hash errors          : {0}" -f $s.HashErrors)
     Write-Output ("  Files with findings  : {0}" -f $s.FilesWithFindings)
+    if ($s.EnvScopesScanned -gt 0) {
+        Write-Output ("  Env scopes scanned   : {0}" -f $s.EnvScopesScanned)
+        Write-Output ("  Env variables scanned: {0}" -f $s.EnvVarsScanned)
+        Write-Output ("  Env vars w/ findings : {0}" -f $s.EnvVarsWithFindings)
+    }
     Write-Output ("  Total findings       : {0}" -f $s.TotalFindings)
     if ($s.ByConfidence.Keys.Count -gt 0) {
         Write-Output '  Findings by confidence:'
@@ -631,8 +812,8 @@ $script:UseDotNetIO = ($langMode -eq 'FullLanguage')
 try {
     Write-Meta ("script=Find-HardcodedSecrets.ps1 version={0} host={1} startUtc={2} langMode={3}" -f `
         $ScriptVersion, $env:COMPUTERNAME, $startUtc, $langMode)
-    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} dotNetIO={4} rules={5}" -f `
-        $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, $script:UseDotNetIO, $script:Rules.Count)
+    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} includeEnvironment={4} dotNetIO={5} rules={6}" -f `
+        $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, [bool]$IncludeEnvironment, $script:UseDotNetIO, $script:Rules.Count)
 
     # Resolve roots to scan.
     $roots = @()
@@ -677,6 +858,15 @@ try {
             Write-Meta 'runtime budget exceeded; stopping with partial results'
             break
         }
+    }
+
+    # Optional: environment-variable scan (registry-backed), after the file scan.
+    if ($IncludeEnvironment -and -not $script:TimeUp) {
+        Write-Meta 'env-scan-start'
+        Invoke-EnvScan
+        Write-Meta ("env-scan-end | scopes={0} vars={1} varsWithFindings={2}" -f `
+            $script:Stats.EnvScopesScanned, $script:Stats.EnvVarsScanned, $script:Stats.EnvVarsWithFindings)
+        if ($script:TimeUp) { $script:Stats.Truncated = $true }
     }
 }
 catch {
