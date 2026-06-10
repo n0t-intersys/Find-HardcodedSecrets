@@ -124,7 +124,7 @@
       * Files are opened read-only with shared read/write access so the script
         does not lock files or block other processes.
 
-    Version : 1.4.0
+    Version : 1.5.0
     Author  : DFIR
 #>
 
@@ -164,7 +164,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.4.0'
+$ScriptVersion = '1.5.0'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -265,6 +265,18 @@ $script:EnvNameKeywordPattern = '(?i)(password|passwd|pwd|secret|api[_-]?key|api
 # Short / ambiguous keywords matched ONLY as a delimited token (^, $, _ or -),
 # so 'key' does not hit PATH/MONKEY/KEYBOARD and 'pat' does not hit PATH.
 $script:EnvNameKeywordBounded = '(?i)(^|[_\-])(pwd|key|keys|cert|certificate|pat|dsn|sas|sig|signature|signing|privkey)([_\-]|$)'
+
+# ---------------------------------------------------------------------------
+# Matching pre-filter gate. A single case-insensitive regex that is a strict
+# SUPERSET of every rule's minimal trigger (a substring that MUST be present for
+# that rule to match). Lines containing none of these triggers cannot match any
+# rule, so the per-line rule loop is skipped for them -- the main matching
+# speed-up on large files. CORRECTNESS RULE: when you add/modify a rule in
+# $script:Rules, add its trigger here too, or that rule could be silently
+# skipped. It is always safe to make this BROADER (over-include); only too-narrow
+# is dangerous. (Validated against a line matching every current rule.)
+# ---------------------------------------------------------------------------
+$script:TriggerPattern = '(?i)(password|passwd|pwd|secret|api|access|auth|client|token|credential|connectionstring|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|://)'
 
 # Confidence ranking for -MinConfidence filtering.
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
@@ -545,6 +557,14 @@ function Invoke-FileScan {
         $line = $lines[$i]
         if ([string]::IsNullOrEmpty($line)) { continue }
 
+        # Pre-filter gate: a single cheap regex that is a strict SUPERSET of every
+        # rule's minimal trigger. If a line contains none of those triggers it
+        # cannot match any rule, so we skip the (otherwise ~23) per-rule regex
+        # evaluations. This is the dominant matching cost on large files; the gate
+        # is correctness-preserving (it can only skip lines no rule would match)
+        # and CLM-safe (plain -match). See $script:TriggerPattern.
+        if ($line -notmatch $script:TriggerPattern) { continue }
+
         foreach ($rule in $script:Rules) {
             if ($rule.CaseSensitive) { $isMatch = $line -cmatch $rule.Pattern }
             else                     { $isMatch = $line -match  $rule.Pattern }
@@ -652,9 +672,24 @@ function Invoke-DirScan {
             $script:Stats.DirsTraversed, $script:Stats.CandidatesMatched, $script:Stats.TotalFindings, $el)
     }
 
+    # Enumerate this directory's children.
+    #   Full Language Mode: System.IO.DirectoryInfo.GetFileSystemInfos() is ~2x+
+    #     faster than Get-ChildItem when walking tens of thousands of directories,
+    #     because it skips PowerShell's per-item PSObject wrapping (the dominant
+    #     cost of a full-disk traversal).
+    #   Constrained Language Mode: fall back to Get-ChildItem (method calls on
+    #     DirectoryInfo are blocked in CLM).
+    # Both return [System.IO.FileSystemInfo] objects, so the directory / reparse
+    # tests below use the raw attribute BITS (Directory=0x10, ReparsePoint=0x400),
+    # which work for both shapes and are CLM-safe (no PSIsContainer dependency).
     $children = $null
     try {
-        $children = @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction Stop)
+        if ($script:UseDotNetIO) {
+            $children = @((New-Object System.IO.DirectoryInfo -ArgumentList $Dir).GetFileSystemInfos())
+        }
+        else {
+            $children = @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction Stop)
+        }
     }
     catch {
         # Access denied, long path, IO error, etc. Isolate and keep going.
@@ -665,7 +700,7 @@ function Invoke-DirScan {
     # Process candidate files first.
     foreach ($c in $children) {
         if ($script:TimeUp) { return }
-        if ($c.PSIsContainer) { continue }
+        if ((([int]$c.Attributes) -band 0x10) -ne 0) { continue }   # directory -> handled below
         if (Test-IsCandidate -Name $c.Name) {
             if (Test-TimeUp) { $script:TimeUp = $true; return }
             Invoke-FileScan -Item $c
@@ -675,8 +710,8 @@ function Invoke-DirScan {
     # Then recurse into subdirectories (skipping reparse points).
     foreach ($c in $children) {
         if ($script:TimeUp) { return }
-        if (-not $c.PSIsContainer) { continue }
-        if ($c.Attributes -match 'ReparsePoint') {
+        if ((([int]$c.Attributes) -band 0x10) -eq 0) { continue }    # not a directory
+        if ((([int]$c.Attributes) -band 0x400) -ne 0) {              # ReparsePoint
             $script:Stats.ReparseSkipped++
             continue
         }

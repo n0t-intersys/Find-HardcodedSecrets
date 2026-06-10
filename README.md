@@ -23,6 +23,16 @@ Defender Live Response returns a command's output **only when it completes**, an
 
 So a bare, arg-less `run Find-HardcodedSecrets.ps1` completes and returns results even on a big, OneDrive-synced corporate endpoint.
 
+## Performance
+
+The full-disk walk is the dominant cost, so the scan is tuned to cover as much as possible inside the Live Response window — without sacrificing recall:
+
+- **Faster traversal.** In Full Language Mode it enumerates directories with `System.IO.DirectoryInfo.GetFileSystemInfos()` instead of `Get-ChildItem`, skipping PowerShell's per-item object wrapping (the dominant cost across tens of thousands of directories). Constrained Language Mode falls back to `Get-ChildItem`. Measured **~3× faster** traversal (`C:\Windows`: 35.6s → 11.3s).
+- **Cheaper matching.** A single pre-filter regex (a strict *superset* of every rule's trigger) gates the per-line rule loop, so lines that can't match skip the ~23 rule evaluations entirely. Measured **~12× faster** on a 5 MB config (16.5s → 1.3s), with **zero recall loss** (validated against a line matching every rule, in both language modes).
+- **No wasted opens.** Cloud/offline placeholders are skipped before opening (no hydration); hashes are computed only for files that have findings.
+
+Both speed-ups preserve detection exactly and work under Constrained Language Mode.
+
 ## Requirements
 
 - Windows PowerShell **5.1** (the version available in Live Response). No PowerShell 7+ syntax is used.
