@@ -54,19 +54,21 @@
     Medium and High; hides Low / encrypted-config findings).
 
 .PARAMETER MaxRuntimeMinutes
-    Time budget for the FILE scan, in minutes. Default: 10. When exceeded, the file
+    Time budget for the FILE scan, in minutes. Default: 30. When exceeded, the file
     scan stops gracefully, partial results are reported, and the run is flagged
     TRUNCATED in the summary.
 
-    This default is deliberate: Microsoft Defender Live Response returns a
+    This budget is deliberate: Microsoft Defender Live Response returns a
     command's output only when it COMPLETES, and it terminates long-running
     commands -- an unbounded full-disk scan gets killed by the system and returns
     NOTHING (the dreaded "Command canceled"). A bounded scan finishes and returns
     what it found. The environment-variable scan runs FIRST and is effectively
     instant, so those findings are captured regardless of this budget.
 
-    Set 0 for unlimited (only when NOT under a session timeout). Raise it if your
-    tenant allows longer Live Response commands and you want deeper file coverage.
+    IMPORTANT: set this BELOW your tenant's Live Response session/command cap. If
+    a session is terminated by the system before the budget elapses you get the
+    same "Command canceled" with no output. Lower it (e.g. 20) if runs are killed.
+    Set 0 for unlimited (only when NOT under a session timeout).
 
 .PARAMETER IncludePlaceholders
     Switch. When set, disables placeholder/reference filtering (e.g. ${VAR},
@@ -124,7 +126,7 @@
       * Files are opened read-only with shared read/write access so the script
         does not lock files or block other processes.
 
-    Version : 1.5.0
+    Version : 1.6.0
     Author  : DFIR
 #>
 
@@ -152,7 +154,7 @@ param(
     [ValidateSet('High', 'Medium', 'Low')]
     [string]$MinConfidence = 'Medium',
 
-    [int]$MaxRuntimeMinutes = 10,
+    [int]$MaxRuntimeMinutes = 30,
 
     [switch]$IncludePlaceholders,
 
@@ -164,7 +166,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.5.0'
+$ScriptVersion = '1.6.0'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
