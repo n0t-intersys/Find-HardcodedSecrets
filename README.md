@@ -4,6 +4,25 @@ A read-only **incident-response** scanner for **Microsoft Defender for Endpoint 
 
 Built for the constrained Live Response shell: Windows PowerShell 5.1, tolerant of Constrained Language Mode and restricted execution policy, fully non-interactive, and forensically sound.
 
+## Script suite (run each separately)
+
+On a large or OneDrive-synced endpoint a single full-disk pass can exceed the Live Response session cap and get killed with no output. So the scan is also split into **focused, single-purpose scripts** — each scoped narrowly so it finishes fast and well under the cap. Upload the one(s) you need and run with the bare, arg-less `run`:
+
+| Script | Scope | Speed | When to use |
+|---|---|---|---|
+| **`Find-EnvVarSecrets.ps1`** | Environment variables (registry: System + each loaded user hive) | **Seconds** | Always run first — instant, high-value (catches `*_API_KEY`, `*_PASSWORD`, `*_SECRET`, etc.) |
+| **`Find-UserProfileSecrets.ps1`** | `.env` / `.config` under `C:\Users` | Fast (bounded) | Most app/developer secrets live in user profiles |
+| **`Find-ServerConfigSecrets.ps1`** | IIS (`inetpub`, `applicationHost.config`), .NET Framework `Config`, `ProgramData` | Fast (bounded) | Web/app servers, service configs, `machine.config` |
+| **`Find-HardcodedSecrets.ps1`** | Everything: env vars + all fixed drives | Slow (full disk) | Comprehensive sweep when you have the time budget |
+
+```text
+run Find-EnvVarSecrets.ps1
+run Find-UserProfileSecrets.ps1
+run Find-ServerConfigSecrets.ps1
+```
+
+All four share the same detection rules, output format (`META | / FILE | / FINDING | / SUMMARY |`), and safety guarantees. The rest of this document describes the full `Find-HardcodedSecrets.ps1`; the focused scripts are trimmed subsets of it.
+
 ## Safety properties
 
 - **Read-only.** Never edits, moves, deletes, renames, or alters any file, attribute, or registry value.
