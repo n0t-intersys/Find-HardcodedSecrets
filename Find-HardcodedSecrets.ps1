@@ -167,6 +167,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ScriptVersion = '1.6.0'
+# Detection-rule generation shared across the Find-*Secrets.ps1 suite (this is the
+# canonical rule set). Bump in ALL of them whenever the rules / TriggerPattern /
+# placeholder list change, so an analyst can confirm they carry the same generation.
+$RulesRev = '1'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -951,8 +955,8 @@ $langMode = $ExecutionContext.SessionState.LanguageMode
 $script:UseDotNetIO = ($langMode -eq 'FullLanguage')
 
 try {
-    Write-Meta ("script=Find-HardcodedSecrets.ps1 version={0} host={1} startUtc={2} langMode={3}" -f `
-        $ScriptVersion, $env:COMPUTERNAME, $startUtc, $langMode)
+    Write-Meta ("script=Find-HardcodedSecrets.ps1 version={0} rulesRev={1} host={2} startUtc={3} langMode={4}" -f `
+        $ScriptVersion, $RulesRev, $env:COMPUTERNAME, $startUtc, $langMode)
     Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} envScanEnabled={4} aggressiveValueScan={5} dotNetIO={6} rules={7}" -f `
         $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, (-not $SkipEnvironment), $script:AggressiveValueScan, $script:UseDotNetIO, $script:Rules.Count)
 
