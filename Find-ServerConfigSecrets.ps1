@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    Read-only Live Response scan of SERVER / WEB / FRAMEWORK config locations for
-    .env / .config files containing hardcoded secrets. Reports location only --
+    Read-only Live Response scan of SERVER / WEB / FRAMEWORK config locations,
+    finding hardcoded secrets in .env / .config files. Reports location only --
     never the value. Scoped to a handful of high-value directories so it finishes
     well under the Live Response session cap.
 
@@ -22,11 +22,24 @@
     5.1; tolerant of Constrained Language Mode. Skips reparse points and
     cloud/offline placeholders. Runs as the bare, arg-less 'run' command.
 
+.PARAMETER Roots
+    One or more directories to scan. Default: the IIS / .NET Framework Config /
+    ProgramData locations above. Override to target a single IIS site or a
+    mounted evidence path -- the default keeps the zero-arg 'run' identical.
+
 .PARAMETER MinConfidence
     Minimum confidence to report: High, Medium or Low. Default: Medium.
 
+.PARAMETER MaxFileSizeMB
+    Skip candidate files larger than this many megabytes. Default: 10. Raise it
+    to scan a large machine.config / applicationHost.config that exceeds it.
+
 .PARAMETER MaxRuntimeMinutes
     File-scan time budget in minutes. Default: 10 (scope is bounded). 0 = unlimited.
+
+.PARAMETER ExcludePaths
+    Case-insensitive path fragments to skip during traversal. Default: a small
+    ProgramData noise list (Windows Defender, Package Cache, WER).
 
 .PARAMETER IncludePlaceholders
     Switch. Disable placeholder/reference filtering (e.g. ${VAR}, changeme).
@@ -35,10 +48,14 @@
     Live Response (zero arguments):
         run Find-ServerConfigSecrets.ps1
 
+.EXAMPLE
+    Target a single IIS site (where args are usable):
+        runscript -scriptName Find-ServerConfigSecrets.ps1 -args "-Roots C:\inetpub\wwwroot\app1"
+
 .NOTES
     Safety: read-only; writes nothing (stdout only); never prints a secret value
     (labels/confidence/line/path/sha256/length only); no network.
-    Version : 1.0.0
+    Version : 1.1.0
     Author  : DFIR
 #>
 
@@ -46,26 +63,39 @@
 
 [CmdletBinding()]
 param(
+    [string[]]$Roots = @(
+        'C:\inetpub',
+        'C:\Windows\System32\inetsrv\config',
+        'C:\Windows\Microsoft.NET\Framework',
+        'C:\Windows\Microsoft.NET\Framework64',
+        'C:\ProgramData'
+    ),
+
     [ValidateSet('High', 'Medium', 'Low')]
     [string]$MinConfidence = 'Medium',
 
+    [int]$MaxFileSizeMB = 10,
+
     [int]$MaxRuntimeMinutes = 10,
+
+    [string[]]$ExcludePaths = @(
+        '\ProgramData\Microsoft\Windows Defender',
+        '\ProgramData\Package Cache',
+        '\ProgramData\Microsoft\Windows\WER'
+    ),
 
     [switch]$IncludePlaceholders
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
+# Shared detection-rule generation (see suite note); bump in ALL Find-*Secrets.ps1
+# when rules/TriggerPattern/placeholders change. Canonical: Find-HardcodedSecrets.ps1.
+$RulesRev = '1'
 
-# ---- Scope: server / web / framework config locations. ----
-$script:ScanRoots = @(
-    'C:\inetpub',
-    'C:\Windows\System32\inetsrv\config',
-    'C:\Windows\Microsoft.NET\Framework',
-    'C:\Windows\Microsoft.NET\Framework64',
-    'C:\ProgramData'
-)
+# ---- Scope: defaults below; override with -Roots for a single IIS site etc. ----
+$script:ScanRoots = $Roots
 
 # ===========================================================================
 # Detection rules (hashtables for Constrained Language Mode safety).
@@ -107,17 +137,13 @@ $script:PlaceholderPatterns = @(
     '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}'
 )
 
-$script:ExcludePaths = @(
-    '\ProgramData\Microsoft\Windows Defender',
-    '\ProgramData\Package Cache',
-    '\ProgramData\Microsoft\Windows\WER'
-)
+$script:ExcludePaths = $ExcludePaths
 
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
 $script:MinRank             = $script:ConfRank[$MinConfidence]
 $script:IncludePlaceholders = [bool]$IncludePlaceholders
 $script:MaxRuntimeMinutes   = $MaxRuntimeMinutes
-$script:MaxFileSizeBytes    = [long]10 * 1MB
+$script:MaxFileSizeBytes    = [long]$MaxFileSizeMB * 1MB
 $script:TimeUp              = $false
 $script:StartLocal          = $null
 $script:UseDotNetIO         = $false
@@ -216,7 +242,10 @@ function Invoke-FileScan {
     $name = $Item.Name.ToLowerInvariant()
     $isConfig = $name.EndsWith('.config')
     $encWindow = @{}
-    if ($isConfig) {
+    # Only do the per-line encrypted-config window pass if the marker is present
+    # at all -- one cheap whole-file -match avoids a second full-file line scan on
+    # large configs (the common case) that contain no protected sections.
+    if ($isConfig -and (($lines -join "`n") -match 'configProtectionProvider')) {
         for ($i = 0; $i -lt $lines.Count; $i++) {
             if ($lines[$i] -match 'configProtectionProvider') {
                 $lo = $i - 5; if ($lo -lt 0) { $lo = 0 }
@@ -318,6 +347,8 @@ function Write-Summary {
     Write-Output ("  Scan roots           : {0}" -f ($script:ScanRoots -join ', '))
     Write-Output ("  Candidate files seen : {0}" -f $s.CandidatesMatched)
     Write-Output ("  Files content-scanned: {0}" -f $s.FilesScanned)
+    Write-Output ("  Skipped (size)       : {0}" -f $s.SkippedSize)
+    Write-Output ("  Skipped (binary)     : {0}" -f $s.SkippedBinary)
     Write-Output ("  Skipped (cloud/offln): {0}" -f $s.SkippedCloud)
     Write-Output ("  Directory errors     : {0}" -f $s.DirErrors)
     Write-Output ("  Reparse pts skipped  : {0}" -f $s.ReparseSkipped)
@@ -337,15 +368,19 @@ $langMode = $ExecutionContext.SessionState.LanguageMode
 $script:UseDotNetIO = ($langMode -eq 'FullLanguage')
 
 try {
-    Write-Meta ("script=Find-ServerConfigSecrets.ps1 version={0} host={1} startUtc={2} langMode={3}" -f $ScriptVersion, $env:COMPUTERNAME, $startUtc, $langMode)
-    Write-Meta ("params | minConfidence={0} maxRuntimeMinutes={1} includePlaceholders={2} dotNetIO={3} rules={4}" -f $MinConfidence, $MaxRuntimeMinutes, $script:IncludePlaceholders, $script:UseDotNetIO, $script:Rules.Count)
+    Write-Meta ("script=Find-ServerConfigSecrets.ps1 version={0} rulesRev={1} host={2} startUtc={3} langMode={4}" -f $ScriptVersion, $RulesRev, $env:COMPUTERNAME, $startUtc, $langMode)
+    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} dotNetIO={4} rules={5}" -f $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, $script:UseDotNetIO, $script:Rules.Count)
     Write-Meta ("scanRoots | {0}" -f ($script:ScanRoots -join ', '))
     foreach ($root in $script:ScanRoots) {
         if ($script:TimeUp) { break }
         if (-not (Test-Path -LiteralPath $root -PathType Container)) { Write-Meta ("root-missing | {0}" -f $root); continue }
         Write-Meta ("scan-start | root={0}" -f $root)
+        # Capture baselines so the per-root scan-end logs THIS root's contribution
+        # (deltas), not the running cumulative totals (multiple roots in this script).
+        $dirsBefore = $script:Stats.DirsTraversed
+        $findsBefore = $script:Stats.TotalFindings
         Invoke-DirScan -Dir $root
-        Write-Meta ("scan-end | root={0} dirsTraversed={1} findings={2}" -f $root, $script:Stats.DirsTraversed, $script:Stats.TotalFindings)
+        Write-Meta ("scan-end | root={0} dirsTraversed={1} findings={2}" -f $root, ($script:Stats.DirsTraversed - $dirsBefore), ($script:Stats.TotalFindings - $findsBefore))
         if ($script:TimeUp) { $script:Stats.Truncated = $true; Write-Meta 'file-scan runtime budget exceeded; stopping with partial results'; break }
     }
 }

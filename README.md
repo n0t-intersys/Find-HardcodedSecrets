@@ -21,7 +21,9 @@ run Find-UserProfileSecrets.ps1
 run Find-ServerConfigSecrets.ps1
 ```
 
-All four share the same detection rules, output format (`META | / FILE | / FINDING | / SUMMARY |`), and safety guarantees. The rest of this document describes the full `Find-HardcodedSecrets.ps1`; the focused scripts are trimmed subsets of it.
+All four share the same detection rules (a `rulesRev=` tag in each script's `META` line lets you confirm they carry the same rule generation), output format (`META | / FILE | / FINDING | / SUMMARY |`), and safety guarantees. The rest of this document describes the full `Find-HardcodedSecrets.ps1`; the focused scripts are trimmed subsets of it.
+
+The focused scripts default to a bare `run`, but also accept parameters via `runscript -args` for targeted/triage use: the file scanners expose `-Roots` (override the scanned locations), `-MaxFileSizeMB`, `-ExcludePaths`, `-MinConfidence`, `-MaxRuntimeMinutes`, `-IncludePlaceholders`; the env scanner exposes `-MinConfidence`, `-IncludePlaceholders`, `-AggressiveValueScan`, `-SkipServiceAccounts`. Every default reproduces the bare-`run` behavior exactly. Example: `runscript -scriptName Find-UserProfileSecrets.ps1 -args "-Roots C:\Users\sean.kennedy"`.
 
 ## Safety properties
 

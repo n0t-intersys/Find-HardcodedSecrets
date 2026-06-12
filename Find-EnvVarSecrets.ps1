@@ -33,6 +33,12 @@
     name has no secret keyword and whose value is not a known provider format.
     Noisier; skips paths, GUIDs, short/low-diversity values. Never emits values.
 
+.PARAMETER SkipServiceAccounts
+    Switch (off by default). Skip the built-in service-account hives
+    (S-1-5-18 SYSTEM, S-1-5-19 LocalService, S-1-5-20 NetworkService), which
+    rarely hold operator-planted secrets. Off by default so the zero-arg run
+    still covers them exactly as before.
+
 .EXAMPLE
     Live Response (zero arguments):
         run Find-EnvVarSecrets.ps1
@@ -40,7 +46,7 @@
 .NOTES
     Safety: read-only; writes nothing to the endpoint (stdout only); never prints
     a secret value (only labels/confidence/scope/name/length); no network.
-    Version : 1.0.0
+    Version : 1.1.0
     Author  : DFIR
 #>
 
@@ -53,37 +59,45 @@ param(
 
     [switch]$IncludePlaceholders,
 
-    [switch]$AggressiveValueScan
+    [switch]$AggressiveValueScan,
+
+    [switch]$SkipServiceAccounts
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
+# Detection-rule generation shared across the Find-*Secrets.ps1 suite. The rule
+# table, placeholder list and (file scanners) TriggerPattern are duplicated per
+# script because Live Response forbids shared modules; bump this in ALL of them
+# whenever those change, so an analyst can confirm they carry the same generation.
+# Canonical source: Find-HardcodedSecrets.ps1.
+$RulesRev = '1'
 
 # --- Structured provider-format rules, matched against the variable VALUE.
 #     Hashtables (not [pscustomobject]) for Constrained Language Mode safety.
 #     CaseSensitive -> matched with -cmatch (preserve provider casing). ---
 $script:Rules = @(
-    @{ Id = 'AWS_AKID';         Label = 'AWS Access Key ID';                   Pattern = '\b(AKIA|ASIA)[0-9A-Z]{16}\b';                                  CaseSensitive = $true }
-    @{ Id = 'GCP_APIKEY';       Label = 'Google API key';                      Pattern = '\bAIza[0-9A-Za-z\-_]{35}\b';                                   CaseSensitive = $true }
-    @{ Id = 'GCP_OAUTH';        Label = 'Google OAuth client ID';              Pattern = '[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com';        CaseSensitive = $true }
-    @{ Id = 'SLACK_TOKEN';      Label = 'Slack token';                         Pattern = '\bxox[baprs]-[0-9A-Za-z-]{10,}\b';                             CaseSensitive = $true }
-    @{ Id = 'GITHUB_TOKEN';     Label = 'GitHub token';                        Pattern = '\bgh[pousr]_[0-9A-Za-z]{36,}\b';                               CaseSensitive = $true }
-    @{ Id = 'GITLAB_PAT';       Label = 'GitLab personal access token';        Pattern = '\bglpat-[0-9A-Za-z\-_]{20,}\b';                                CaseSensitive = $true }
-    @{ Id = 'STRIPE_LIVE';      Label = 'Stripe live secret key';              Pattern = '\b(sk|rk)_live_[0-9A-Za-z]{20,}\b';                            CaseSensitive = $true }
-    @{ Id = 'SENDGRID_KEY';     Label = 'SendGrid API key';                    Pattern = '\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b';               CaseSensitive = $true }
-    @{ Id = 'TWILIO_SK';        Label = 'Twilio API key SID';                  Pattern = '\bSK[0-9a-fA-F]{32}\b';                                        CaseSensitive = $true }
-    @{ Id = 'PRIVATE_KEY';      Label = 'Private key block (PEM/OpenSSH/PGP)';  Pattern = '-----BEGIN (RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----'; CaseSensitive = $true }
-    @{ Id = 'JWT';              Label = 'JSON Web Token';                       Pattern = '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'; CaseSensitive = $true }
-    @{ Id = 'AZURE_STORAGE';    Label = 'Azure storage AccountKey';            Pattern = 'AccountKey=[A-Za-z0-9+/=]{40,}';                               CaseSensitive = $true }
-    @{ Id = 'OPENAI_ANTHROPIC'; Label = 'OpenAI/Anthropic API key';            Pattern = '\bsk-(proj-|ant-)?[A-Za-z0-9_-]{20,}\b';                       CaseSensitive = $true }
-    @{ Id = 'NPM_TOKEN';        Label = 'npm access token';                    Pattern = '\bnpm_[A-Za-z0-9]{36}\b';                                      CaseSensitive = $true }
-    @{ Id = 'GITHUB_FG_PAT';    Label = 'GitHub fine-grained PAT';             Pattern = '\bgithub_pat_[0-9A-Za-z_]{82}\b';                              CaseSensitive = $true }
-    @{ Id = 'AZURE_AD_SECRET';  Label = 'Azure AD client secret';              Pattern = '\b[A-Za-z0-9_~.\-]{3}[78]Q~[A-Za-z0-9_~.\-]{31,34}\b';         CaseSensitive = $true }
-    @{ Id = 'SLACK_WEBHOOK';    Label = 'Slack webhook URL';                   Pattern = 'https://hooks\.slack\.com/services/[A-Za-z0-9/]+';             CaseSensitive = $false }
-    @{ Id = 'TWILIO_AC';        Label = 'Twilio Account SID';                  Pattern = '\bAC[0-9a-f]{32}\b';                                           CaseSensitive = $true }
-    @{ Id = 'MAILGUN_KEY';      Label = 'Mailgun API key';                     Pattern = '\bkey-[0-9a-f]{32}\b';                                         CaseSensitive = $true }
-    @{ Id = 'URL_CRED';         Label = 'URL with embedded credentials';       Pattern = '(?i)[a-z][a-z0-9+.\-]*://[^:/?#\s@]+:[^@/?#\s]{2,}@';           CaseSensitive = $false }
+    @{ Id = 'AWS_AKID';         Label = 'AWS Access Key ID';                   Pattern = '\b(AKIA|ASIA)[0-9A-Z]{16}\b';                                  CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'GCP_APIKEY';       Label = 'Google API key';                      Pattern = '\bAIza[0-9A-Za-z\-_]{35}\b';                                   CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'GCP_OAUTH';        Label = 'Google OAuth client ID';              Pattern = '[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com';        CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'SLACK_TOKEN';      Label = 'Slack token';                         Pattern = '\bxox[baprs]-[0-9A-Za-z-]{10,}\b';                             CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'GITHUB_TOKEN';     Label = 'GitHub token';                        Pattern = '\bgh[pousr]_[0-9A-Za-z]{36,}\b';                               CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'GITLAB_PAT';       Label = 'GitLab personal access token';        Pattern = '\bglpat-[0-9A-Za-z\-_]{20,}\b';                                CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'STRIPE_LIVE';      Label = 'Stripe live secret key';              Pattern = '\b(sk|rk)_live_[0-9A-Za-z]{20,}\b';                            CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'SENDGRID_KEY';     Label = 'SendGrid API key';                    Pattern = '\bSG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}\b';               CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'TWILIO_SK';        Label = 'Twilio API key SID';                  Pattern = '\bSK[0-9a-fA-F]{32}\b';                                        CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'PRIVATE_KEY';      Label = 'Private key block (PEM/OpenSSH/PGP)';  Pattern = '-----BEGIN (RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----'; CaseSensitive = $true; Confidence = 'High' }
+    @{ Id = 'JWT';              Label = 'JSON Web Token';                       Pattern = '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'; CaseSensitive = $true; Confidence = 'High' }
+    @{ Id = 'AZURE_STORAGE';    Label = 'Azure storage AccountKey';            Pattern = 'AccountKey=[A-Za-z0-9+/=]{40,}';                               CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'OPENAI_ANTHROPIC'; Label = 'OpenAI/Anthropic API key';            Pattern = '\bsk-(proj-|ant-)?[A-Za-z0-9_-]{20,}\b';                       CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'NPM_TOKEN';        Label = 'npm access token';                    Pattern = '\bnpm_[A-Za-z0-9]{36}\b';                                      CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'GITHUB_FG_PAT';    Label = 'GitHub fine-grained PAT';             Pattern = '\bgithub_pat_[0-9A-Za-z_]{82}\b';                              CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'AZURE_AD_SECRET';  Label = 'Azure AD client secret';              Pattern = '\b[A-Za-z0-9_~.\-]{3}[78]Q~[A-Za-z0-9_~.\-]{31,34}\b';         CaseSensitive = $true;  Confidence = 'High' }
+    @{ Id = 'SLACK_WEBHOOK';    Label = 'Slack webhook URL';                   Pattern = 'https://hooks\.slack\.com/services/[A-Za-z0-9/]+';             CaseSensitive = $false; Confidence = 'High' }
+    @{ Id = 'TWILIO_AC';        Label = 'Twilio Account SID';                  Pattern = '\bAC[0-9a-f]{32}\b';                                           CaseSensitive = $true;  Confidence = 'Medium' }
+    @{ Id = 'MAILGUN_KEY';      Label = 'Mailgun API key';                     Pattern = '\bkey-[0-9a-f]{32}\b';                                         CaseSensitive = $true;  Confidence = 'Medium' }
+    @{ Id = 'URL_CRED';         Label = 'URL with embedded credentials';       Pattern = '(?i)[a-z][a-z0-9+.\-]*://[^:/?#\s@]+:[^@/?#\s]{2,}@';           CaseSensitive = $false; Confidence = 'High' }
 )
 
 # Placeholder / reference values to ignore (matched against the value only).
@@ -102,6 +116,7 @@ $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
 $script:MinRank  = $script:ConfRank[$MinConfidence]
 $script:IncludePlaceholders = [bool]$IncludePlaceholders
 $script:AggressiveValueScan = [bool]$AggressiveValueScan
+$script:SkipServiceAccounts = [bool]$SkipServiceAccounts
 
 $script:Stats = @{
     EnvScopesScanned    = 0
@@ -176,6 +191,7 @@ function Get-EnvScope {
             $sid = $k.PSChildName
             if ($sid -like '*_Classes') { continue }
             if ($sid -notlike 'S-1-*') { continue }   # local/domain + Azure AD (S-1-12-1-...)
+            if ($script:SkipServiceAccounts -and ($sid -eq 'S-1-5-18' -or $sid -eq 'S-1-5-19' -or $sid -eq 'S-1-5-20')) { continue }
             $envPath = 'Registry::HKEY_USERS\' + $sid + '\Environment'
             if (-not (Test-Path -LiteralPath $envPath -ErrorAction SilentlyContinue)) { continue }
             $scopes += @{ Friendly = 'User:' + (Resolve-UserScopeName -Sid $sid); RegPath = $envPath; Display = 'HKU\' + $sid + '\Environment' }
@@ -212,14 +228,15 @@ function Invoke-EnvScan {
             $varFindings = @()
             $seen = @{}
 
-            # Pass A: provider-format rules on the VALUE -> High.
+            # Pass A: provider-format rules on the VALUE (per-rule confidence,
+            # matching the reference scanner -- TWILIO_AC / MAILGUN_KEY are Medium).
             foreach ($rule in $script:Rules) {
                 if ($rule.CaseSensitive) { $isMatch = $vval -cmatch $rule.Pattern } else { $isMatch = $vval -match $rule.Pattern }
                 if (-not $isMatch) { continue }
                 if ($seen.ContainsKey($rule.Id)) { continue }
-                if ($script:ConfRank['High'] -lt $script:MinRank) { continue }
+                if ($script:ConfRank[$rule.Confidence] -lt $script:MinRank) { continue }
                 $seen[$rule.Id] = $true
-                $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = 'High'; Length = ([string]$matches[0]).Length }
+                $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = $rule.Confidence; Length = ([string]$matches[0]).Length }
             }
 
             # Pass B: secret-like NAME + non-placeholder value -> Medium.
@@ -283,8 +300,8 @@ $startUtc = $startLocal.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $langMode = $ExecutionContext.SessionState.LanguageMode
 
 try {
-    Write-Meta ("script=Find-EnvVarSecrets.ps1 version={0} host={1} startUtc={2} langMode={3}" -f $ScriptVersion, $env:COMPUTERNAME, $startUtc, $langMode)
-    Write-Meta ("params | minConfidence={0} includePlaceholders={1} aggressiveValueScan={2} rules={3}" -f $MinConfidence, $script:IncludePlaceholders, $script:AggressiveValueScan, $script:Rules.Count)
+    Write-Meta ("script=Find-EnvVarSecrets.ps1 version={0} rulesRev={1} host={2} startUtc={3} langMode={4}" -f $ScriptVersion, $RulesRev, $env:COMPUTERNAME, $startUtc, $langMode)
+    Write-Meta ("params | minConfidence={0} includePlaceholders={1} aggressiveValueScan={2} skipServiceAccounts={3} rules={4}" -f $MinConfidence, $script:IncludePlaceholders, $script:AggressiveValueScan, $script:SkipServiceAccounts, $script:Rules.Count)
     Invoke-EnvScan
 }
 catch {

@@ -16,12 +16,25 @@
     points and cloud/offline placeholders (no OneDrive hydration / off-box
     traffic). Runs as the bare, arg-less Live Response 'run' command.
 
+.PARAMETER Roots
+    One or more directories to scan. Default: C:\Users. Override to retarget the
+    scan (a single profile, a mounted evidence path, etc.) -- the default keeps
+    the zero-arg 'run' behavior identical.
+
 .PARAMETER MinConfidence
     Minimum confidence to report: High, Medium or Low. Default: Medium.
+
+.PARAMETER MaxFileSizeMB
+    Skip candidate files larger than this many megabytes. Default: 10. Raise it
+    to scan a large machine.config / JSON dump that exceeds the guardrail.
 
 .PARAMETER MaxRuntimeMinutes
     File-scan time budget in minutes. Default: 10 (the scope is bounded, so this
     is plenty; keep it below your Live Response session cap). 0 = unlimited.
+
+.PARAMETER ExcludePaths
+    Case-insensitive path fragments to skip during traversal. Default: a small
+    high-noise user-profile list (INetCache, AppData\Local\Packages, Explorer).
 
 .PARAMETER IncludePlaceholders
     Switch. Disable placeholder/reference filtering (e.g. ${VAR}, changeme).
@@ -30,10 +43,14 @@
     Live Response (zero arguments):
         run Find-UserProfileSecrets.ps1
 
+.EXAMPLE
+    Target a single profile (where args are usable):
+        runscript -scriptName Find-UserProfileSecrets.ps1 -args "-Roots C:\Users\sean.kennedy"
+
 .NOTES
     Safety: read-only; writes nothing (stdout only); never prints a secret value
     (labels/confidence/line/path/sha256/length only); no network.
-    Version : 1.0.0
+    Version : 1.1.0
     Author  : DFIR
 #>
 
@@ -41,20 +58,33 @@
 
 [CmdletBinding()]
 param(
+    [string[]]$Roots = @('C:\Users'),
+
     [ValidateSet('High', 'Medium', 'Low')]
     [string]$MinConfidence = 'Medium',
 
+    [int]$MaxFileSizeMB = 10,
+
     [int]$MaxRuntimeMinutes = 10,
+
+    [string[]]$ExcludePaths = @(
+        '\AppData\Local\Microsoft\Windows\INetCache',
+        '\AppData\Local\Packages',
+        '\AppData\Local\Microsoft\Windows\Explorer'
+    ),
 
     [switch]$IncludePlaceholders
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
+# Shared detection-rule generation (see suite note); bump in ALL Find-*Secrets.ps1
+# when rules/TriggerPattern/placeholders change. Canonical: Find-HardcodedSecrets.ps1.
+$RulesRev = '1'
 
-# ---- Scope: the only thing that differs between the scoped file scanners. ----
-$script:ScanRoots = @('C:\Users')
+# ---- Scope: default below; override with -Roots for targeted/triage scans. ----
+$script:ScanRoots = $Roots
 
 # ===========================================================================
 # Detection rules (hashtables for Constrained Language Mode safety).
@@ -96,17 +126,13 @@ $script:PlaceholderPatterns = @(
     '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}'
 )
 
-$script:ExcludePaths = @(
-    '\AppData\Local\Microsoft\Windows\INetCache',
-    '\AppData\Local\Packages',
-    '\AppData\Local\Microsoft\Windows\Explorer'
-)
+$script:ExcludePaths = $ExcludePaths
 
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
 $script:MinRank             = $script:ConfRank[$MinConfidence]
 $script:IncludePlaceholders = [bool]$IncludePlaceholders
 $script:MaxRuntimeMinutes   = $MaxRuntimeMinutes
-$script:MaxFileSizeBytes    = [long]10 * 1MB
+$script:MaxFileSizeBytes    = [long]$MaxFileSizeMB * 1MB
 $script:TimeUp              = $false
 $script:StartLocal          = $null
 $script:UseDotNetIO         = $false
@@ -208,7 +234,10 @@ function Invoke-FileScan {
     $name = $Item.Name.ToLowerInvariant()
     $isConfig = $name.EndsWith('.config')
     $encWindow = @{}
-    if ($isConfig) {
+    # Only do the per-line encrypted-config window pass if the marker is present
+    # at all -- one cheap whole-file -match avoids a second full-file line scan on
+    # large configs (the common case) that contain no protected sections.
+    if ($isConfig -and (($lines -join "`n") -match 'configProtectionProvider')) {
         for ($i = 0; $i -lt $lines.Count; $i++) {
             if ($lines[$i] -match 'configProtectionProvider') {
                 $lo = $i - 5; if ($lo -lt 0) { $lo = 0 }
@@ -310,6 +339,8 @@ function Write-Summary {
     Write-Output ("  Scan roots           : {0}" -f ($script:ScanRoots -join ', '))
     Write-Output ("  Candidate files seen : {0}" -f $s.CandidatesMatched)
     Write-Output ("  Files content-scanned: {0}" -f $s.FilesScanned)
+    Write-Output ("  Skipped (size)       : {0}" -f $s.SkippedSize)
+    Write-Output ("  Skipped (binary)     : {0}" -f $s.SkippedBinary)
     Write-Output ("  Skipped (cloud/offln): {0}" -f $s.SkippedCloud)
     Write-Output ("  Directory errors     : {0}" -f $s.DirErrors)
     Write-Output ("  Reparse pts skipped  : {0}" -f $s.ReparseSkipped)
@@ -329,8 +360,8 @@ $langMode = $ExecutionContext.SessionState.LanguageMode
 $script:UseDotNetIO = ($langMode -eq 'FullLanguage')
 
 try {
-    Write-Meta ("script=Find-UserProfileSecrets.ps1 version={0} host={1} startUtc={2} langMode={3}" -f $ScriptVersion, $env:COMPUTERNAME, $startUtc, $langMode)
-    Write-Meta ("params | minConfidence={0} maxRuntimeMinutes={1} includePlaceholders={2} dotNetIO={3} rules={4}" -f $MinConfidence, $MaxRuntimeMinutes, $script:IncludePlaceholders, $script:UseDotNetIO, $script:Rules.Count)
+    Write-Meta ("script=Find-UserProfileSecrets.ps1 version={0} rulesRev={1} host={2} startUtc={3} langMode={4}" -f $ScriptVersion, $RulesRev, $env:COMPUTERNAME, $startUtc, $langMode)
+    Write-Meta ("params | minConfidence={0} maxFileSizeMB={1} maxRuntimeMinutes={2} includePlaceholders={3} dotNetIO={4} rules={5}" -f $MinConfidence, $MaxFileSizeMB, $MaxRuntimeMinutes, $script:IncludePlaceholders, $script:UseDotNetIO, $script:Rules.Count)
     Write-Meta ("scanRoots | {0}" -f ($script:ScanRoots -join ', '))
     foreach ($root in $script:ScanRoots) {
         if ($script:TimeUp) { break }
