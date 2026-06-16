@@ -109,15 +109,21 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 
 ## Usage — Intune (fleet hunting)
 
-For scanning the whole fleet, use **`intune/Detect-EnvVarSecrets.ps1`** as a **Remediations detection script** (Devices → *Scripts and remediations*). Unlike Intune *platform* scripts — which only report success/failure and bury stdout in the per-device IME log — a Remediation surfaces the detection script's output in the portal ("Pre-remediation detection output").
+For scanning the whole fleet, use the **`intune/Detect-*Secrets.ps1`** scripts as **Remediations detection scripts** (Devices → *Scripts and remediations*). Unlike Intune *platform* scripts — which only report success/failure and bury stdout in the per-device IME log — a Remediation surfaces the detection script's output in the portal ("Pre-remediation detection output").
 
-- **Settings:** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script's defaults are the config.
-- **Behavior:** the script **exits 1** when env-var secrets are found (device flagged "issue detected") and **0** when clean. Intune Remediations surface only the **last** stdout line as the detection output, so the whole report is packed onto **one line** (verdict + counts + findings inline), capped under ~2 KB:
+| Detection script | Scans | Use as |
+|---|---|---|
+| **`intune/Detect-EnvVarSecrets.ps1`** | Environment variables (registry, all loaded hives) | Remediation #1 — instant |
+| **`intune/Detect-UserProfileSecrets.ps1`** | `.env` / `.config` under `C:\Users` | Remediation #2 — file-based |
+
+- **Settings (both):** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script defaults are the config. Upload the **whole file** (browse to it — don't paste, which can truncate to just the comment header and produce empty output / a false "clean").
+- **Behavior:** each script **exits 1** when secrets are found (device flagged "issue detected") and **0** when clean. Intune Remediations surface only the **last** stdout line, so the whole report is packed onto **one line** (verdict + counts + findings inline), capped under ~2 KB:
   ```text
   STATUS=FOUND | host=PC123 ver=1.0.1 n=3 high=1 med=2 low=0 scopes=2 rev=1 :: HIGH AWS_AKID User:sean.kennedy::AWS_ACCESS_KEY_ID(20) ; MED ENV_NAMED_SECRET User:sean.kennedy::BRIVO_PASSWORD(13) ; ...
+  STATUS=FOUND | host=PC123 ver=1.0.0 n=4 high=1 med=3 low=0 files=2 scanned=3 trunc=0 rev=1 :: HIGH AWS_AKID C:\Users\sean\app\.env:1 ; MED GEN_PASSWORD C:\Users\sean\app\.env:2 ; ...
   ```
-  (or `STATUS=CLEAN …` / `STATUS=ERROR …`). It never prints the secret value — only scope, variable name, and length.
-- **Note:** Intune (and the IME) terminate scripts after ~30 minutes, so the full-disk `Find-HardcodedSecrets.ps1` is a poor fit for Intune; this env-only detection runs in seconds. Detection logic is identical to `Find-EnvVarSecrets.ps1` and is kept in sync by the drift guard.
+  (or `STATUS=CLEAN …` / `STATUS=ERROR …`). They never print the secret value — only the location (scope+name, or path:line). The file scanner adds `trunc=1` if its time budget was hit (partial results); for full per-finding detail run the matching `Find-*Secrets.ps1` via Live Response on a flagged device.
+- **Note:** Intune (and the IME) terminate scripts after ~30 minutes, so the full-disk `Find-HardcodedSecrets.ps1` is a poor fit for Intune. The env detection runs in seconds; the user-profile one is bounded (default 10-min budget). Detection logic is identical to the matching `Find-*Secrets.ps1` and is kept in sync by the drift guard.
 
 ## Parameters
 
