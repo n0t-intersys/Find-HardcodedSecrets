@@ -93,8 +93,8 @@ function Get-ScannerModel {
 
 # --- Load all scanners -----------------------------------------------------
 
-$paths = Get-ChildItem -Path $Dir -Filter 'Find-*Secrets.ps1' | Sort-Object Name
-if (-not $paths) { Write-Output "FAIL | no Find-*Secrets.ps1 scripts found in $Dir"; exit 1 }
+$paths = Get-ChildItem -Path $Dir -Recurse -File -Include 'Find-*Secrets.ps1', 'Detect-*Secrets.ps1' | Sort-Object Name
+if (-not $paths) { Write-Output "FAIL | no Find-*Secrets.ps1 / Detect-*Secrets.ps1 scripts found in $Dir"; exit 1 }
 $models = $paths | ForEach-Object { Get-ScannerModel -Path $_.FullName }
 
 $problems = @()
