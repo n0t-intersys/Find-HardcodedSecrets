@@ -19,12 +19,12 @@
     Constrained Language Mode; never emits a secret VALUE (only scope + variable
     name + length).
 
-    Output (first line always present, even when truncated):
-      STATUS=FOUND | host=<h> | env-secrets=<n> | high=<a> med=<b> low=<c> | scopes=<s> | rulesRev=<r>
-      HIGH <RuleId> <Scope>::<VarName> len=<n>
-      ...
-    or  STATUS=CLEAN | host=<h> | env-secrets=0 | scopes=<s> | rulesRev=<r>
-    or  STATUS=ERROR | host=<h> | msg=<...>   (exit 1, so scan failures surface)
+    Output is a SINGLE line (Intune Remediations surfaces only the last stdout
+    line as the detection output, so the whole report -- verdict, counts, and
+    findings inline -- is packed onto one line, capped under ~2 KB):
+      STATUS=FOUND | host=<h> ver=<v> n=<n> high=<a> med=<b> low=<c> scopes=<s> rev=<r> :: HIGH <RuleId> <Scope>::<VarName>(<len>) ; MED ... [; (+N more)]
+    or  STATUS=CLEAN | host=<h> ver=<v> n=0 scopes=<s> rev=<r>
+    or  STATUS=ERROR | host=<h> ver=<v> rev=<r> | msg=<...>   (exit 1, so scan failures surface)
 
 .PARAMETER MinConfidence
     Minimum confidence to report: High, Medium or Low. Default: Medium.
@@ -47,7 +47,7 @@
 .NOTES
     Safety: read-only; writes nothing; never prints a secret value; no network.
     Exit codes: 0 = clean, 1 = secrets found OR scan error.
-    Version : 1.0.0
+    Version : 1.0.1
     Author  : DFIR
 #>
 
@@ -67,7 +67,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.0.1'
 # Shared detection-rule generation (see suite note); bump in ALL Find-*Secrets.ps1
 # / Detect-*Secrets.ps1 when rules change. Canonical: Find-HardcodedSecrets.ps1.
 $RulesRev = '1'
@@ -239,14 +239,14 @@ try { Invoke-EnvScan } catch { $err = $_.Exception.Message }
 
 if ($err) {
     # Surface scan failure (exit 1) rather than silently reporting "clean".
-    Write-Output ("STATUS=ERROR | host={0} | ver={1} | rulesRev={2} | msg={3}" -f $env:COMPUTERNAME, $ScriptVersion, $RulesRev, ($err -replace '\s+', ' '))
+    Write-Output ("STATUS=ERROR | host={0} ver={1} rev={2} | msg={3}" -f $env:COMPUTERNAME, $ScriptVersion, $RulesRev, ($err -replace '\s+', ' '))
     exit 1
 }
 
 $findings = @($script:Findings)
 $n = $findings.Count
 if ($n -eq 0) {
-    Write-Output ("STATUS=CLEAN | host={0} | ver={1} | env-secrets=0 | scopes={2} | rulesRev={3}" -f $env:COMPUTERNAME, $ScriptVersion, $script:EnvScopesScanned, $RulesRev)
+    Write-Output ("STATUS=CLEAN | host={0} ver={1} n=0 scopes={2} rev={3}" -f $env:COMPUTERNAME, $ScriptVersion, $script:EnvScopesScanned, $RulesRev)
     exit 0
 }
 
@@ -254,31 +254,32 @@ $high = @($findings | Where-Object { $_.Confidence -eq 'High' }).Count
 $med  = @($findings | Where-Object { $_.Confidence -eq 'Medium' }).Count
 $low  = @($findings | Where-Object { $_.Confidence -eq 'Low' }).Count
 
-$statusLine = "STATUS=FOUND | host={0} | ver={1} | env-secrets={2} | high={3} med={4} low={5} | scopes={6} | rulesRev={7}" -f `
+# Intune Remediations surface only the LAST stdout line as the detection output,
+# so emit the ENTIRE report on ONE line: verdict + counts, then the findings
+# inline (High -> Medium -> Low), capped under ~2 KB with a (+N more) overflow
+# note. One line also survives whatever the agent captures (first/last/all).
+$head = "STATUS=FOUND | host={0} ver={1} n={2} high={3} med={4} low={5} scopes={6} rev={7}" -f `
     $env:COMPUTERNAME, $ScriptVersion, $n, $high, $med, $low, $script:EnvScopesScanned, $RulesRev
-Write-Output $statusLine
-
-# Emit findings High -> Medium -> Low (no Sort-Object on hashtables), staying
-# under Intune's ~2 KB detection-output cap; note any that don't fit.
 $tag = @{ 'High' = 'HIGH'; 'Medium' = 'MED'; 'Low' = 'LOW' }
 $budget = 2000
-$used = $statusLine.Length + 2
+$used = $head.Length + 4
+$parts = @()
 $shown = 0
-$truncated = $false
+$stop = $false
 foreach ($conf in @('High', 'Medium', 'Low')) {
-    if ($truncated) { break }
+    if ($stop) { break }
     foreach ($f in $findings) {
         if ($f.Confidence -ne $conf) { continue }
-        $line = "{0,-4} {1} {2}::{3} len={4}" -f $tag[$conf], $f.RuleId, $f.Scope, $f.Name, $f.Length
-        if (($used + $line.Length + 1) -gt $budget) {
-            Write-Output ("...(+{0} more; collect full output from the IME log)" -f ($n - $shown))
-            $truncated = $true
+        $item = "{0} {1} {2}::{3}({4})" -f $tag[$conf], $f.RuleId, $f.Scope, $f.Name, $f.Length
+        if (($used + $item.Length + 3) -gt $budget) {
+            $parts += ("(+{0} more)" -f ($n - $shown))
+            $stop = $true
             break
         }
-        Write-Output $line
-        $used += $line.Length + 1
+        $parts += $item
+        $used += $item.Length + 3
         $shown++
     }
 }
-
+Write-Output ($head + ' :: ' + ($parts -join ' ; '))
 exit 1

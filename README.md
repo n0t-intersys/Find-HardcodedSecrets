@@ -112,12 +112,9 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 For scanning the whole fleet, use **`intune/Detect-EnvVarSecrets.ps1`** as a **Remediations detection script** (Devices → *Scripts and remediations*). Unlike Intune *platform* scripts — which only report success/failure and bury stdout in the per-device IME log — a Remediation surfaces the detection script's output in the portal ("Pre-remediation detection output").
 
 - **Settings:** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script's defaults are the config.
-- **Behavior:** the script **exits 1** when env-var secrets are found (device flagged "issue detected") and **0** when clean. Its output is **summary-first and capped under ~2 KB** so the verdict + counts always survive the portal's truncation:
+- **Behavior:** the script **exits 1** when env-var secrets are found (device flagged "issue detected") and **0** when clean. Intune Remediations surface only the **last** stdout line as the detection output, so the whole report is packed onto **one line** (verdict + counts + findings inline), capped under ~2 KB:
   ```text
-  STATUS=FOUND | host=PC123 | ver=1.0.0 | env-secrets=3 | high=1 med=2 low=0 | scopes=2 | rulesRev=1
-  HIGH AWS_AKID User:sean.kennedy::AWS_ACCESS_KEY_ID len=20
-  MED  ENV_NAMED_SECRET User:sean.kennedy::BRIVO_PASSWORD len=13
-  ...
+  STATUS=FOUND | host=PC123 ver=1.0.1 n=3 high=1 med=2 low=0 scopes=2 rev=1 :: HIGH AWS_AKID User:sean.kennedy::AWS_ACCESS_KEY_ID(20) ; MED ENV_NAMED_SECRET User:sean.kennedy::BRIVO_PASSWORD(13) ; ...
   ```
   (or `STATUS=CLEAN …` / `STATUS=ERROR …`). It never prints the secret value — only scope, variable name, and length.
 - **Note:** Intune (and the IME) terminate scripts after ~30 minutes, so the full-disk `Find-HardcodedSecrets.ps1` is a poor fit for Intune; this env-only detection runs in seconds. Detection logic is identical to `Find-EnvVarSecrets.ps1` and is kept in sync by the drift guard.
