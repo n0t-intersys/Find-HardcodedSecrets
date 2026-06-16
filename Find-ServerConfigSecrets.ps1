@@ -55,7 +55,7 @@
 .NOTES
     Safety: read-only; writes nothing (stdout only); never prints a secret value
     (labels/confidence/line/path/sha256/length only); no network.
-    Version : 1.1.0
+    Version : 1.1.1
     Author  : DFIR
 #>
 
@@ -89,7 +89,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.1.1'
 # Shared detection-rule generation (see suite note); bump in ALL Find-*Secrets.ps1
 # when rules/TriggerPattern/placeholders change. Canonical: Find-HardcodedSecrets.ps1.
 $RulesRev = '1'
@@ -137,7 +137,7 @@ $script:PlaceholderPatterns = @(
     '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}'
 )
 
-$script:ExcludePaths = $ExcludePaths
+$script:ExcludePaths = @($ExcludePaths | ForEach-Object { $_.ToLowerInvariant() })   # pre-lowered once for Test-ExcludeDir (hot path)
 
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
 $script:MinRank             = $script:ConfRank[$MinConfidence]
@@ -164,7 +164,7 @@ function Add-Count { param($Hash, $Key) if ($Hash.ContainsKey($Key)) { $Hash[$Ke
 function Test-ExcludeDir {
     param([string]$Path)
     $lower = $Path.ToLowerInvariant()
-    foreach ($x in $script:ExcludePaths) { if ($x -and $lower.Contains($x.ToLowerInvariant())) { return $true } }
+    foreach ($x in $script:ExcludePaths) { if ($x -and $lower.Contains($x)) { return $true } }
     return $false
 }
 

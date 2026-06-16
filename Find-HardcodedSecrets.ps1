@@ -126,7 +126,7 @@
       * Files are opened read-only with shared read/write access so the script
         does not lock files or block other processes.
 
-    Version : 1.6.0
+    Version : 1.6.1
     Author  : DFIR
 #>
 
@@ -166,7 +166,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.6.0'
+$ScriptVersion = '1.6.1'
 # Detection-rule generation shared across the Find-*Secrets.ps1 suite (this is the
 # canonical rule set). Bump in ALL of them whenever the rules / TriggerPattern /
 # placeholder list change, so an analyst can confirm they carry the same generation.
@@ -315,7 +315,7 @@ $script:StartLocal          = $null
 $script:UseDotNetIO         = $false
 $script:MaxFileSizeBytes    = [long]$MaxFileSizeMB * 1MB
 $script:MaxRuntimeMinutes   = $MaxRuntimeMinutes
-$script:ExcludePaths        = $ExcludePaths
+$script:ExcludePaths        = @($ExcludePaths | ForEach-Object { $_.ToLowerInvariant() })   # pre-lowered once for Test-ExcludeDir (hot path)
 $script:IncludePlaceholders = [bool]$IncludePlaceholders
 $script:AggressiveValueScan = [bool]$AggressiveValueScan
 $script:MinRank             = $script:ConfRank[$MinConfidence]
@@ -346,7 +346,7 @@ function Get-FixedDrive {
                 if ($p.Name -match '^[A-Za-z]$') { $result += ($p.Name + ':') }
             }
         }
-        catch { }
+        catch { $null = $_ }   # best-effort: return whatever drives resolved
     }
     return $result
 }
@@ -356,7 +356,7 @@ function Test-ExcludeDir {
     param([string]$Path)
     $lower = $Path.ToLowerInvariant()
     foreach ($x in $script:ExcludePaths) {
-        if ($x -and $lower.Contains($x.ToLowerInvariant())) { return $true }
+        if ($x -and $lower.Contains($x)) { return $true }
     }
     return $false
 }
@@ -744,7 +744,7 @@ function Resolve-UserScopeName {
         $path = [string]$pp.ProfileImagePath
         if (-not [string]::IsNullOrEmpty($path)) { return (Split-Path -Leaf $path) }
     }
-    catch { }
+    catch { $null = $_ }   # best-effort: fall through to well-known SIDs / raw SID
     switch ($Sid) {
         'S-1-5-18' { return 'SYSTEM' }
         'S-1-5-19' { return 'LocalService' }
@@ -835,10 +835,11 @@ function Invoke-EnvScan {
                 if ($rule.CaseSensitive) { $isMatch = $vval -cmatch $rule.Pattern }
                 else                     { $isMatch = $vval -match  $rule.Pattern }
                 if (-not $isMatch) { continue }
+                $matchLen = ([string]$matches[0]).Length   # capture while $matches is fresh for this rule
                 if ($seen.ContainsKey($rule.Id)) { continue }
                 if ($script:ConfRank[$rule.Confidence] -lt $script:MinRank) { continue }
                 $seen[$rule.Id] = $true
-                $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = $rule.Confidence; Length = ([string]$matches[0]).Length }
+                $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = $rule.Confidence; Length = $matchLen }
             }
 
             # Pass B: secret-like NAME (substring keywords OR delimited short

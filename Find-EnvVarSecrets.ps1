@@ -46,7 +46,7 @@
 .NOTES
     Safety: read-only; writes nothing to the endpoint (stdout only); never prints
     a secret value (only labels/confidence/scope/name/length); no network.
-    Version : 1.1.0
+    Version : 1.1.1
     Author  : DFIR
 #>
 
@@ -66,7 +66,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.1.1'
 # Detection-rule generation shared across the Find-*Secrets.ps1 suite. The rule
 # table, placeholder list and (file scanners) TriggerPattern are duplicated per
 # script because Live Response forbids shared modules; bump this in ALL of them
@@ -172,7 +172,7 @@ function Resolve-UserScopeName {
         $path = [string]$pp.ProfileImagePath
         if (-not [string]::IsNullOrEmpty($path)) { return (Split-Path -Leaf $path) }
     }
-    catch { }
+    catch { $null = $_ }   # best-effort: fall through to well-known SIDs / raw SID
     switch ($Sid) {
         'S-1-5-18' { return 'SYSTEM' }
         'S-1-5-19' { return 'LocalService' }
@@ -233,10 +233,11 @@ function Invoke-EnvScan {
             foreach ($rule in $script:Rules) {
                 if ($rule.CaseSensitive) { $isMatch = $vval -cmatch $rule.Pattern } else { $isMatch = $vval -match $rule.Pattern }
                 if (-not $isMatch) { continue }
+                $matchLen = ([string]$matches[0]).Length   # capture while $matches is fresh for this rule
                 if ($seen.ContainsKey($rule.Id)) { continue }
                 if ($script:ConfRank[$rule.Confidence] -lt $script:MinRank) { continue }
                 $seen[$rule.Id] = $true
-                $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = $rule.Confidence; Length = ([string]$matches[0]).Length }
+                $varFindings += @{ RuleId = $rule.Id; Label = $rule.Label; Confidence = $rule.Confidence; Length = $matchLen }
             }
 
             # Pass B: secret-like NAME + non-placeholder value -> Medium.

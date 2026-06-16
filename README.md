@@ -25,6 +25,16 @@ All four share the same detection rules (a `rulesRev=` tag in each script's `MET
 
 The focused scripts default to a bare `run`, but also accept parameters via `runscript -args` for targeted/triage use: the file scanners expose `-Roots` (override the scanned locations), `-MaxFileSizeMB`, `-ExcludePaths`, `-MinConfidence`, `-MaxRuntimeMinutes`, `-IncludePlaceholders`; the env scanner exposes `-MinConfidence`, `-IncludePlaceholders`, `-AggressiveValueScan`, `-SkipServiceAccounts`. Every default reproduces the bare-`run` behavior exactly. Example: `runscript -scriptName Find-UserProfileSecrets.ps1 -args "-Roots C:\Users\sean.kennedy"`.
 
+### Maintaining the suite
+
+Because each scanner is self-contained, the detection rule table, the pre-filter `TriggerPattern`, the `PlaceholderPatterns`, and the `RulesRev` tag are duplicated across the scripts. After editing any of those, run the drift guard — a dev/CI tool, **not** a Live Response script — which parses every scanner and fails if a rule shared by two scripts differs in pattern or confidence, or if the trigger/placeholders/`RulesRev` diverge:
+
+```powershell
+powershell -File tools\Test-SuiteConsistency.ps1   # exit 0 = consistent, 1 = drift
+```
+
+All scanners are PSScriptAnalyzer-clean (0 warnings/errors).
+
 ## Safety properties
 
 - **Read-only.** Never edits, moves, deletes, renames, or alters any file, attribute, or registry value.
