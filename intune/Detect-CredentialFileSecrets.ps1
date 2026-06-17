@@ -1,57 +1,61 @@
 <#
 .SYNOPSIS
-    Microsoft Intune REMEDIATION DETECTION script. Read-only scan of user-profile
-    files (C:\Users by default) for .env / .config files containing hardcoded
-    secrets. Exits 1 when secrets are found (device flagged "issue detected"),
-    0 when clean. Emits a compact, single-line report sized to survive Intune's
-    ~2 KB detection-output cap. Never prints the secret value.
+    Microsoft Intune REMEDIATION DETECTION script. Read-only probe of well-known
+    developer / CLI credential files under user profiles (C:\Users by default)
+    for hardcoded secrets -- e.g. .git-credentials, .npmrc, .netrc, .pypirc,
+    .aws\credentials, .docker\config.json, .ssh private keys, cloud-CLI token
+    caches and shell history. Exits 1 when secrets are found (device flagged
+    "issue detected"), 0 when clean. One compact stdout line. Never the value.
 
 .DESCRIPTION
-    Companion to Detect-EnvVarSecrets.ps1 for FILE-based secrets. Intune use:
-    Devices -> Scripts and remediations -> create a remediation, use THIS as the
-    detection script. Recommended settings: Run as SYSTEM, 64-bit, signature
-    check off. Intune passes no arguments, so the defaults are the operative
-    config; Intune surfaces only the LAST stdout line, so the whole report is on
-    ONE line (verdict + counts + findings inline), capped under ~2 KB.
+    Companion to Detect-UserProfileSecrets.ps1. Where that script walks the whole
+    profile tree, THIS one goes straight to a curated list of files that are, by
+    convention, where tools stash long-lived credentials. That makes it fast and
+    high-signal -- it touches a couple of dozen exact paths per profile instead of
+    traversing everything. Intune use: Devices -> Scripts and remediations ->
+    create a remediation, use THIS as the detection script. Recommended settings:
+    Run as SYSTEM, 64-bit, signature check off. Intune passes no arguments, so the
+    defaults are the operative config; Intune surfaces only the LAST stdout line,
+    so the whole report is on ONE line (verdict + counts + findings inline),
+    capped under ~2 KB.
 
-    Detection logic / rules are identical to Find-UserProfileSecrets.ps1 (kept in
-    sync by tools\Test-SuiteConsistency.ps1). Read-only; opens files shared
-    read/write; skips reparse points and cloud/offline placeholders (no OneDrive
-    hydration); Windows PowerShell 5.1; tolerant of Constrained Language Mode.
+    Detection rules / TriggerPattern / placeholders are the shared suite set (kept
+    in sync by tools\Test-SuiteConsistency.ps1), plus three credential-file
+    formats the generic keyword=value rules miss (netrc space-delimited password,
+    .npmrc _auth=, Docker "auth":). Read-only; opens files shared read/write;
+    skips cloud/offline placeholders (no OneDrive hydration); Windows PowerShell
+    5.1; tolerant of Constrained Language Mode.
 
     Output (single line):
       STATUS=FOUND | host=<h> ver=<v> n=<n> high=<a> med=<b> low=<c> files=<f> scanned=<s> trunc=<0|1> rev=<r> :: HIGH <RuleId> <path>:<line> ; MED ... [; (+N more)]
     or  STATUS=CLEAN | host=<h> ver=<v> n=0 scanned=<s> trunc=<0|1> rev=<r>
     or  STATUS=ERROR | host=<h> ver=<v> rev=<r> | msg=<...>   (exit 1)
-    trunc=1 means the file-scan time budget was hit -> results are PARTIAL. For
-    full per-finding detail (incl. SHA-256), run Find-UserProfileSecrets.ps1 via
-    Live Response on a flagged device.
+    trunc=1 means the time budget was hit -> results are PARTIAL. For full
+    per-finding detail (incl. SHA-256), run Find-UserProfileSecrets.ps1 via Live
+    Response on a flagged device.
 
 .PARAMETER Roots
-    Directories to scan. Default: C:\Users. (Intune can't pass args; for local
-    testing you can point this at a fixture folder.)
+    Profile container directories. Default: C:\Users. Each root itself and its
+    immediate (non-junction) child directories are treated as profiles to probe.
+    (Intune can't pass args; for local testing point this at a fixture folder.)
 
 .PARAMETER MinConfidence
     Minimum confidence to report: High, Medium or Low. Default: Medium.
 
 .PARAMETER MaxFileSizeMB
-    Skip candidate files larger than this many megabytes. Default: 10.
+    Skip probed files larger than this many megabytes. Default: 10.
 
 .PARAMETER MaxRuntimeMinutes
-    File-scan time budget in minutes. Default: 10 (well under Intune's ~30 min
-    kill). On exceed, the scan stops, reports partial results, and sets trunc=1.
+    Time budget in minutes. Default: 10 (well under Intune's ~30 min kill). On
+    exceed, the probe stops, reports partial results, and sets trunc=1.
     0 = unlimited (not recommended for Intune).
-
-.PARAMETER ExcludePaths
-    Case-insensitive path fragments to skip. Default: high-noise user-profile
-    caches (INetCache, AppData\Local\Packages, Explorer).
 
 .PARAMETER IncludePlaceholders
     Switch. Disable placeholder/reference filtering (e.g. ${VAR}, changeme).
 
 .EXAMPLE
     Local test:
-        powershell -ExecutionPolicy Bypass -File .\Detect-UserProfileSecrets.ps1 ; $LASTEXITCODE
+        powershell -ExecutionPolicy Bypass -File .\Detect-CredentialFileSecrets.ps1 ; $LASTEXITCODE
 
 .NOTES
     Safety: read-only; writes nothing; never prints a secret value (path + line
@@ -73,14 +77,6 @@ param(
 
     [int]$MaxRuntimeMinutes = 10,
 
-    [string[]]$ExcludePaths = @(
-        '\node_modules', '\.nuget\packages', '\site-packages', '\__pycache__',
-        '\.gradle', '\.cargo', '\.terraform', '\.vscode\extensions',
-        '\AppData\Local\Microsoft\Windows\INetCache',
-        '\AppData\Local\Packages',
-        '\AppData\Local\Microsoft\Windows\Explorer'
-    ),
-
     [switch]$IncludePlaceholders
 )
 
@@ -93,8 +89,12 @@ $ScriptVersion = '1.0.0'
 $RulesRev = '2'
 
 # ===========================================================================
-# Detection rules (identical to Find-UserProfileSecrets.ps1; kept in sync by
-# tools\Test-SuiteConsistency.ps1). Hashtables for Constrained Language Mode.
+# Detection rules. The first block is the shared suite set (identical to
+# Find-HardcodedSecrets.ps1; kept in sync by tools\Test-SuiteConsistency.ps1).
+# The trailing block is credential-file-specific (unique to this script) and is
+# NOT subject to the cross-script drift check. Hashtables for CLM safety.
+# CaseSensitive -> -cmatch; 'Structured' = whole match is the token; 'Contextual'
+# = keyword=value, value placeholder-filtered.
 # ===========================================================================
 $script:Rules = @(
     @{ Id = 'AWS_AKID';         Label = 'AWS Access Key ID';                   Pattern = '\b(AKIA|ASIA)[0-9A-Z]{16}\b';                                  CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
@@ -120,8 +120,16 @@ $script:Rules = @(
     @{ Id = 'GEN_PASSWORD';     Label = 'Password assignment';                 Pattern = '(password|passwd|pwd)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{4,})';  CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'GEN_SECRET';       Label = 'Secret/token/key assignment';         Pattern = '(api[_-]?key|secret|client[_-]?secret|access[_-]?key|access[_-]?token|auth[_-]?token|token)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{8,})'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'CONN_STRING';      Label = 'Connection string with credentials';  Pattern = '(connectionstring\s*=|<add[^>]+connectionstring\s*=)[^>]*\b(password|pwd)\s*=\s*(?<val>[^;"''>\s]+)'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    # --- Credential-file-specific (unique to this script; formats the generic
+    #     keyword=value rules don't catch). Not part of the shared drift check. ---
+    @{ Id = 'NETRC_PW';         Label = 'netrc/login password (space-delimited)'; Pattern = '(?i)\b(password|passwd)\s+(?<val>[^\s]{4,})';                CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'NPMRC_AUTH';       Label = 'npm _auth token (.npmrc)';            Pattern = '(?i)_auth\s*=\s*["'']?(?<val>[^\s"'']{8,})';                   CaseSensitive = $false; Confidence = 'High';   Type = 'Contextual' }
+    @{ Id = 'DOCKER_AUTH';      Label = 'Docker registry auth (config.json)';  Pattern = '(?i)"auth"\s*:\s*"(?<val>[^"]{8,})"';                          CaseSensitive = $false; Confidence = 'High';   Type = 'Contextual' }
 )
 
+# Pre-filter gate: strict SUPERSET of every rule trigger (shared set already
+# covers 'password' and 'auth', which the credential-file rules key on). Lines
+# with no trigger skip the per-rule loop. Broaden (never narrow) when adding rules.
 $script:TriggerPattern = '(?i)(password|passwd|pwd|secret|api|access|auth|client|token|credential|connectionstring|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|://)'
 
 $script:PlaceholderPatterns = @(
@@ -129,28 +137,41 @@ $script:PlaceholderPatterns = @(
     '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}'
 )
 
-$script:ScanRoots          = $Roots
-$script:ExcludePaths       = @($ExcludePaths | ForEach-Object { $_.ToLowerInvariant() })   # pre-lowered for Test-ExcludeDir
+$script:ScanRoots = $Roots
 
-# Candidate selection (broad: user profiles stash secrets in many file types).
-# Extensions checked via String.EndsWith (CLM-safe; [System.IO.Path] is CLM-blocked).
-$script:CandidateExt = @(
-    '.env', '.config', '.json', '.yaml', '.yml', '.ini', '.toml', '.properties',
-    '.conf', '.cfg', '.cnf', '.xml', '.ps1', '.psm1', '.psd1', '.bat', '.cmd',
-    '.sh', '.py', '.js', '.ts', '.tf', '.tfvars', '.txt', '.pem', '.key'
-)
-$script:CandidateName = @(
-    '.git-credentials', '.npmrc', '.netrc', '.pypirc', '.gitconfig', 'credentials'
+# Curated target set, relative to each profile root. These are the conventional
+# homes of long-lived credentials for common dev / CLI tooling.
+$script:CredRelFiles = @(
+    '.git-credentials',
+    '.netrc', '_netrc',
+    '.npmrc', '.pypirc', '.s3cfg', '.boto',
+    '.aws\credentials', '.aws\config',
+    '.docker\config.json',
+    '.kube\config',
+    '.azure\accessTokens.json',
+    '.config\gh\hosts.yml',
+    '.config\gcloud\application_default_credentials.json',
+    'AppData\Roaming\gcloud\application_default_credentials.json',
+    '.m2\settings.xml',
+    '.gradle\gradle.properties',
+    '.dbeaver\credentials-config.json',
+    'AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt',
+    '.bash_history', '.zsh_history', '.python_history', '.psql_history', '.mysql_history'
 )
 
-$script:ConfRank           = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
-$script:MinRank            = $script:ConfRank[$MinConfidence]
+# Directories whose immediate files are all scanned (skip the listed suffixes).
+$script:CredRelDirs = @(
+    @{ Rel = '.ssh'; Skip = @('.pub', 'known_hosts') }
+)
+
+$script:ConfRank            = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
+$script:MinRank             = $script:ConfRank[$MinConfidence]
 $script:IncludePlaceholders = [bool]$IncludePlaceholders
-$script:MaxRuntimeMinutes  = $MaxRuntimeMinutes
-$script:MaxFileSizeBytes   = [long]$MaxFileSizeMB * 1MB
-$script:TimeUp             = $false
-$script:StartLocal         = $null
-$script:UseDotNetIO        = $false
+$script:MaxRuntimeMinutes   = $MaxRuntimeMinutes
+$script:MaxFileSizeBytes    = [long]$MaxFileSizeMB * 1MB
+$script:TimeUp              = $false
+$script:StartLocal          = $null
+$script:UseDotNetIO         = $false
 
 $script:Findings          = @()
 $script:CandidatesMatched = 0
@@ -161,27 +182,10 @@ $script:SkippedBinary     = 0
 $script:SkippedCloud      = 0
 $script:FileErrors        = 0
 $script:DirErrors         = 0
-$script:ReparseSkipped    = 0
 
 # ===========================================================================
 # Helpers (mirror Find-UserProfileSecrets.ps1; no inline output -- collect only)
 # ===========================================================================
-
-function Test-ExcludeDir {
-    param([string]$Path)
-    $lower = $Path.ToLowerInvariant()
-    foreach ($x in $script:ExcludePaths) { if ($x -and $lower.Contains($x)) { return $true } }
-    return $false
-}
-
-function Test-IsCandidate {
-    param([string]$Name)
-    $n = $Name.ToLowerInvariant()
-    if ($n.StartsWith('.env.')) { return $true }                              # .env.local / .env.production / ...
-    foreach ($x in $script:CandidateName) { if ($n -eq $x) { return $true } } # exact credential filenames
-    foreach ($x in $script:CandidateExt)  { if ($n.EndsWith($x)) { return $true } }
-    return $false
-}
 
 function Test-TimeUp {
     if ($script:MaxRuntimeMinutes -le 0) { return $false }
@@ -237,18 +241,6 @@ function Invoke-FileScan {
     catch { $script:FileErrors++; return }
     $script:FilesScanned++
 
-    $isConfig = $Item.Name.ToLowerInvariant().EndsWith('.config')
-    $encWindow = @{}
-    if ($isConfig -and (($lines -join "`n") -match 'configProtectionProvider')) {
-        for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match 'configProtectionProvider') {
-                $lo = $i - 5; if ($lo -lt 0) { $lo = 0 }
-                $hi = $i + 5; $maxIdx = $lines.Count - 1; if ($hi -gt $maxIdx) { $hi = $maxIdx }
-                for ($j = $lo; $j -le $hi; $j++) { $encWindow[$j] = $true }
-            }
-        }
-    }
-
     $hadFinding = $false
     $seen = @{}
     for ($i = 0; $i -lt $lines.Count; $i++) {
@@ -269,7 +261,6 @@ function Invoke-FileScan {
             }
 
             $conf = $rule.Confidence
-            if ($isConfig -and $encWindow.ContainsKey($i)) { $conf = 'Low' }
             if ($script:ConfRank[$conf] -lt $script:MinRank) { continue }
 
             $seen[$dupKey] = $true
@@ -280,48 +271,69 @@ function Invoke-FileScan {
     if ($hadFinding) { $script:FilesWithFindings++ }
 }
 
-function Invoke-DirScan {
-    param([string]$Dir)
-    if ($script:TimeUp) { return }
-    if (Test-TimeUp) { $script:TimeUp = $true; return }
-    if (Test-ExcludeDir -Path $Dir) { return }
+function Invoke-ProbeFile {
+    param([string]$FullPath)
+    if (-not (Test-Path -LiteralPath $FullPath -PathType Leaf)) { return }
+    $item = $null
+    try { $item = Get-Item -LiteralPath $FullPath -Force -ErrorAction Stop }
+    catch { $script:FileErrors++; return }
+    Invoke-FileScan -Item $item
+}
 
-    $children = $null
-    try {
-        if ($script:UseDotNetIO) { $children = @((New-Object System.IO.DirectoryInfo -ArgumentList $Dir).GetFileSystemInfos()) }
-        else { $children = @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction Stop) }
-    }
+function Invoke-ProbeDir {
+    param([string]$DirPath, [string[]]$SkipSuffix)
+    if (-not (Test-Path -LiteralPath $DirPath -PathType Container)) { return }
+    $files = $null
+    try { $files = @(Get-ChildItem -LiteralPath $DirPath -Force -File -ErrorAction Stop) }
     catch { $script:DirErrors++; return }
-
-    foreach ($c in $children) {
+    foreach ($f in $files) {
         if ($script:TimeUp) { return }
-        if ((([int]$c.Attributes) -band 0x10) -ne 0) { continue }   # directory
-        if (Test-IsCandidate -Name $c.Name) {
-            if (Test-TimeUp) { $script:TimeUp = $true; return }
-            Invoke-FileScan -Item $c
-        }
-    }
-    foreach ($c in $children) {
-        if ($script:TimeUp) { return }
-        if ((([int]$c.Attributes) -band 0x10) -eq 0) { continue }   # not a directory
-        if ((([int]$c.Attributes) -band 0x400) -ne 0) { $script:ReparseSkipped++; continue }   # reparse point
-        Invoke-DirScan -Dir $c.FullName
+        if (Test-TimeUp) { $script:TimeUp = $true; return }
+        $skip = $false
+        $ln = $f.Name.ToLowerInvariant()
+        foreach ($s in $SkipSuffix) { if ($ln.EndsWith($s)) { $skip = $true; break } }
+        if ($skip) { continue }
+        Invoke-FileScan -Item $f
     }
 }
 
 # ===========================================================================
-# Main -- scan, then emit ONE summary line and set the exit code.
+# Main -- probe each profile's credential files, then emit ONE summary line.
 # ===========================================================================
 
-$script:StartLocal = Get-Date
+$script:StartLocal  = Get-Date
 $script:UseDotNetIO = ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage')
 
 $err = $null
 try {
+    # Build the profile list: each root + its immediate (non-junction) child dirs.
+    $profiles = @()
     foreach ($root in $script:ScanRoots) {
-        if ($script:TimeUp) { break }
         if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
-        Invoke-DirScan -Dir $root
+        $profiles += $root
+        $kids = $null
+        try { $kids = @(Get-ChildItem -LiteralPath $root -Force -Directory -ErrorAction Stop) }
+        catch { $script:DirErrors++; $kids = @() }
+        foreach ($k in $kids) {
+            if ((([int]$k.Attributes) -band 0x400) -ne 0) { continue }   # skip reparse/junction profiles
+            $profiles += $k.FullName
+        }
+    }
+    $profiles = @($profiles | Select-Object -Unique)
+
+    foreach ($p in $profiles) {
+        if ($script:TimeUp) { break }
+        if (Test-TimeUp) { $script:TimeUp = $true; break }
+        foreach ($rel in $script:CredRelFiles) {
+            if ($script:TimeUp) { break }
+            if (Test-TimeUp) { $script:TimeUp = $true; break }
+            Invoke-ProbeFile -FullPath (Join-Path -Path $p -ChildPath $rel)
+        }
+        foreach ($d in $script:CredRelDirs) {
+            if ($script:TimeUp) { break }
+            if (Test-TimeUp) { $script:TimeUp = $true; break }
+            Invoke-ProbeDir -DirPath (Join-Path -Path $p -ChildPath $d.Rel) -SkipSuffix $d.Skip
+        }
     }
 }
 catch { $err = $_.Exception.Message }

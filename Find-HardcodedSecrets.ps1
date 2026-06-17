@@ -170,7 +170,7 @@ $ScriptVersion = '1.6.1'
 # Detection-rule generation shared across the Find-*Secrets.ps1 suite (this is the
 # canonical rule set). Bump in ALL of them whenever the rules / TriggerPattern /
 # placeholder list change, so an analyst can confirm they carry the same generation.
-$RulesRev = '1'
+$RulesRev = '2'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -232,8 +232,8 @@ $script:Rules = @(
     #    risk, so the captured value is placeholder-filtered before recording.
     #    The value is captured but never printed. --
 
-    @{ Id = 'GEN_PASSWORD';  Label = 'Password assignment';               Pattern = '\b(password|passwd|pwd)\s*[:=]\s*["'']?(?<val>[^"''\s;]{4,})';                       CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
-    @{ Id = 'GEN_SECRET';    Label = 'Secret/token/key assignment';       Pattern = '\b(api[_-]?key|secret|client[_-]?secret|access[_-]?key|auth[_-]?token|token)\s*[:=]\s*["'']?(?<val>[^"''\s;]{8,})'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GEN_PASSWORD';  Label = 'Password assignment';               Pattern = '(password|passwd|pwd)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{4,})';                       CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GEN_SECRET';    Label = 'Secret/token/key assignment';       Pattern = '(api[_-]?key|secret|client[_-]?secret|access[_-]?key|access[_-]?token|auth[_-]?token|token)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{8,})'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'CONN_STRING';   Label = 'Connection string with credentials'; Pattern = '(connectionstring\s*=|<add[^>]+connectionstring\s*=)[^>]*\b(password|pwd)\s*=\s*(?<val>[^;"''>\s]+)'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
 )
 

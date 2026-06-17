@@ -28,7 +28,9 @@
 
 [CmdletBinding()]
 param(
-    [string]$Dir = (Split-Path -Parent $PSScriptRoot)
+    # Default to the repo root (parent of tools\). $PSScriptRoot can be empty when
+    # invoked oddly (e.g. -File with a relative path), so fall back to the CWD.
+    [string]$Dir = $(if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { (Get-Location).Path })
 )
 
 Set-StrictMode -Version Latest

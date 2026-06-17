@@ -72,7 +72,7 @@ $ScriptVersion = '1.1.1'
 # script because Live Response forbids shared modules; bump this in ALL of them
 # whenever those change, so an analyst can confirm they carry the same generation.
 # Canonical source: Find-HardcodedSecrets.ps1.
-$RulesRev = '1'
+$RulesRev = '2'
 
 # --- Structured provider-format rules, matched against the variable VALUE.
 #     Hashtables (not [pscustomobject]) for Constrained Language Mode safety.

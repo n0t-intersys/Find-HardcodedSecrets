@@ -11,7 +11,7 @@ On a large or OneDrive-synced endpoint a single full-disk pass can exceed the Li
 | Script | Scope | Speed | When to use |
 |---|---|---|---|
 | **`Find-EnvVarSecrets.ps1`** | Environment variables (registry: System + each loaded user hive) | **Seconds** | Always run first — instant, high-value (catches `*_API_KEY`, `*_PASSWORD`, `*_SECRET`, etc.) |
-| **`Find-UserProfileSecrets.ps1`** | `.env` / `.config` under `C:\Users` | Fast (bounded) | Most app/developer secrets live in user profiles |
+| **`Find-UserProfileSecrets.ps1`** | Secret-bearing files under `C:\Users` — `.env`, `.config`, plus common config/code/text types (`.json`, `.yml`, `.ini`, `.xml`, `.ps1`, `.py`, `.js`, `.txt`, …) and named credential files (`.git-credentials`, `.npmrc`, `.netrc`, …) | Bounded (10-min budget) | Most app/developer secrets live in user profiles |
 | **`Find-ServerConfigSecrets.ps1`** | IIS (`inetpub`, `applicationHost.config`), .NET Framework `Config`, `ProgramData` | Fast (bounded) | Web/app servers, service configs, `machine.config` |
 | **`Find-HardcodedSecrets.ps1`** | Everything: env vars + all fixed drives | Slow (full disk) | Comprehensive sweep when you have the time budget |
 
@@ -114,16 +114,17 @@ For scanning the whole fleet, use the **`intune/Detect-*Secrets.ps1`** scripts a
 | Detection script | Scans | Use as |
 |---|---|---|
 | **`intune/Detect-EnvVarSecrets.ps1`** | Environment variables (registry, all loaded hives) | Remediation #1 — instant |
-| **`intune/Detect-UserProfileSecrets.ps1`** | `.env` / `.config` under `C:\Users` | Remediation #2 — file-based |
+| **`intune/Detect-CredentialFileSecrets.ps1`** | Well-known dev/CLI credential files under `C:\Users` (`.git-credentials`, `.npmrc`, `.netrc`, `.aws\credentials`, `.docker\config.json`, `.ssh` private keys, cloud-CLI token caches, shell history, …) | Remediation #2 — fast, high-signal |
+| **`intune/Detect-UserProfileSecrets.ps1`** | Secret-bearing files under `C:\Users` — `.env`, `.config`, and common config/code/text types (`.json`, `.yml`, `.ini`, `.xml`, `.ps1`, `.py`, `.js`, `.txt`, …) | Remediation #3 — broad file sweep |
 
-- **Settings (both):** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script defaults are the config. Upload the **whole file** (browse to it — don't paste, which can truncate to just the comment header and produce empty output / a false "clean").
+- **Settings (all):** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script defaults are the config. Upload the **whole file** (browse to it — don't paste, which can truncate to just the comment header and produce empty output / a false "clean").
 - **Behavior:** each script **exits 1** when secrets are found (device flagged "issue detected") and **0** when clean. Intune Remediations surface only the **last** stdout line, so the whole report is packed onto **one line** (verdict + counts + findings inline), capped under ~2 KB:
   ```text
   STATUS=FOUND | host=PC123 ver=1.0.1 n=3 high=1 med=2 low=0 scopes=2 rev=1 :: HIGH AWS_AKID User:sean.kennedy::AWS_ACCESS_KEY_ID(20) ; MED ENV_NAMED_SECRET User:sean.kennedy::BRIVO_PASSWORD(13) ; ...
   STATUS=FOUND | host=PC123 ver=1.0.0 n=4 high=1 med=3 low=0 files=2 scanned=3 trunc=0 rev=1 :: HIGH AWS_AKID C:\Users\sean\app\.env:1 ; MED GEN_PASSWORD C:\Users\sean\app\.env:2 ; ...
   ```
   (or `STATUS=CLEAN …` / `STATUS=ERROR …`). They never print the secret value — only the location (scope+name, or path:line). The file scanner adds `trunc=1` if its time budget was hit (partial results); for full per-finding detail run the matching `Find-*Secrets.ps1` via Live Response on a flagged device.
-- **Note:** Intune (and the IME) terminate scripts after ~30 minutes, so the full-disk `Find-HardcodedSecrets.ps1` is a poor fit for Intune. The env detection runs in seconds; the user-profile one is bounded (default 10-min budget). Detection logic is identical to the matching `Find-*Secrets.ps1` and is kept in sync by the drift guard.
+- **Note:** Intune (and the IME) terminate scripts after ~30 minutes, so the full-disk `Find-HardcodedSecrets.ps1` is a poor fit for Intune. The env detection runs in seconds; the credential-file detector probes a fixed list of known paths (also seconds); the user-profile sweep is bounded (default 10-min budget, `trunc=1` if hit). The credential-file and user-profile detectors are complementary: the former uniquely catches formats the recursive sweep misses (space-delimited `.netrc` passwords, Docker `"auth"`, `.npmrc _auth=`, `.ssh` private keys), while the latter covers arbitrary config/code/text files anywhere in the profile. Shared detection rules are kept in sync with the matching `Find-*Secrets.ps1` by the drift guard.
 
 ## Parameters
 
@@ -161,6 +162,8 @@ Matched case-insensitively, kept deliberately tight to stay fast and low-noise o
 - `*.env` — `.env`, `secret.env`, `prod.env`, `database.env`, …
 - `.env.*` — `.env.local`, `.env.production`, `.env.development`, …
 - `*.config` — `web.config`, `app.config`, `machine.config`, `*.exe.config`, `applicationHost.config`, …
+
+The **user-profile** scanners (`Find-UserProfileSecrets.ps1` / `intune/Detect-UserProfileSecrets.ps1`) cast a wider net, since profiles hide secrets in many file types: in addition to the above they match common config/code/text extensions (`.json`, `.yaml`/`.yml`, `.ini`, `.toml`, `.properties`, `.conf`/`.cfg`/`.cnf`, `.xml`, `.ps1`/`.psm1`/`.psd1`, `.bat`/`.cmd`/`.sh`, `.py`/`.js`/`.ts`, `.tf`/`.tfvars`, `.txt`, `.pem`/`.key`) and named credential files (`.git-credentials`, `.npmrc`, `.netrc`, `.pypirc`, `.gitconfig`, `credentials`). They also exclude high-volume dev caches (`node_modules`, `.nuget\packages`, `site-packages`, `__pycache__`, `.gradle`, `.cargo`, `.terraform`, `.vscode\extensions`) to stay fast. `intune/Detect-CredentialFileSecrets.ps1` instead probes a fixed list of exact credential-file paths per profile (no traversal).
 
 ## Output
 

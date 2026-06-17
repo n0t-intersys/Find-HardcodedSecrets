@@ -68,6 +68,8 @@ param(
     [int]$MaxRuntimeMinutes = 10,
 
     [string[]]$ExcludePaths = @(
+        '\node_modules', '\.nuget\packages', '\site-packages', '\__pycache__',
+        '\.gradle', '\.cargo', '\.terraform', '\.vscode\extensions',
         '\AppData\Local\Microsoft\Windows\INetCache',
         '\AppData\Local\Packages',
         '\AppData\Local\Microsoft\Windows\Explorer'
@@ -81,7 +83,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptVersion = '1.1.1'
 # Shared detection-rule generation (see suite note); bump in ALL Find-*Secrets.ps1
 # when rules/TriggerPattern/placeholders change. Canonical: Find-HardcodedSecrets.ps1.
-$RulesRev = '1'
+$RulesRev = '2'
 
 # ---- Scope: default below; override with -Roots for targeted/triage scans. ----
 $script:ScanRoots = $Roots
@@ -112,8 +114,8 @@ $script:Rules = @(
     @{ Id = 'TWILIO_AC';        Label = 'Twilio Account SID';                  Pattern = '\bAC[0-9a-f]{32}\b';                                           CaseSensitive = $true;  Confidence = 'Medium'; Type = 'Structured' }
     @{ Id = 'MAILGUN_KEY';      Label = 'Mailgun API key';                     Pattern = '\bkey-[0-9a-f]{32}\b';                                         CaseSensitive = $true;  Confidence = 'Medium'; Type = 'Structured' }
     @{ Id = 'URL_CRED';         Label = 'URL with embedded credentials';       Pattern = '(?i)[a-z][a-z0-9+.\-]*://[^:/?#\s@]+:[^@/?#\s]{2,}@';           CaseSensitive = $false; Confidence = 'High';   Type = 'Structured' }
-    @{ Id = 'GEN_PASSWORD';     Label = 'Password assignment';                 Pattern = '\b(password|passwd|pwd)\s*[:=]\s*["'']?(?<val>[^"''\s;]{4,})';  CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
-    @{ Id = 'GEN_SECRET';       Label = 'Secret/token/key assignment';         Pattern = '\b(api[_-]?key|secret|client[_-]?secret|access[_-]?key|auth[_-]?token|token)\s*[:=]\s*["'']?(?<val>[^"''\s;]{8,})'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GEN_PASSWORD';     Label = 'Password assignment';                 Pattern = '(password|passwd|pwd)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{4,})';  CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GEN_SECRET';       Label = 'Secret/token/key assignment';         Pattern = '(api[_-]?key|secret|client[_-]?secret|access[_-]?key|access[_-]?token|auth[_-]?token|token)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{8,})'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'CONN_STRING';      Label = 'Connection string with credentials';  Pattern = '(connectionstring\s*=|<add[^>]+connectionstring\s*=)[^>]*\b(password|pwd)\s*=\s*(?<val>[^;"''>\s]+)'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
 )
 
@@ -127,6 +129,18 @@ $script:PlaceholderPatterns = @(
 )
 
 $script:ExcludePaths = @($ExcludePaths | ForEach-Object { $_.ToLowerInvariant() })   # pre-lowered once for Test-ExcludeDir (hot path)
+
+# Candidate selection (broad: user profiles stash secrets in many file types).
+# Extensions checked via String.EndsWith (CLM-safe; [System.IO.Path] is CLM-blocked).
+$script:CandidateExt = @(
+    '.env', '.config', '.json', '.yaml', '.yml', '.ini', '.toml', '.properties',
+    '.conf', '.cfg', '.cnf', '.xml', '.ps1', '.psm1', '.psd1', '.bat', '.cmd',
+    '.sh', '.py', '.js', '.ts', '.tf', '.tfvars', '.txt', '.pem', '.key'
+)
+# Specific credential files that carry no candidate extension.
+$script:CandidateName = @(
+    '.git-credentials', '.npmrc', '.netrc', '.pypirc', '.gitconfig', 'credentials'
+)
 
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
 $script:MinRank             = $script:ConfRank[$MinConfidence]
@@ -160,9 +174,9 @@ function Test-ExcludeDir {
 function Test-IsCandidate {
     param([string]$Name)
     $n = $Name.ToLowerInvariant()
-    if ($n.EndsWith('.env'))    { return $true }
-    if ($n.StartsWith('.env.')) { return $true }
-    if ($n.EndsWith('.config')) { return $true }
+    if ($n.StartsWith('.env.')) { return $true }                              # .env.local / .env.production / ...
+    foreach ($x in $script:CandidateName) { if ($n -eq $x) { return $true } } # exact credential filenames
+    foreach ($x in $script:CandidateExt)  { if ($n.EndsWith($x)) { return $true } }
     return $false
 }
 
