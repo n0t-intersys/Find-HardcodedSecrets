@@ -72,7 +72,7 @@ $ScriptVersion = '1.1.1'
 # script because Live Response forbids shared modules; bump this in ALL of them
 # whenever those change, so an analyst can confirm they carry the same generation.
 # Canonical source: Find-HardcodedSecrets.ps1.
-$RulesRev = '2'
+$RulesRev = '3'
 
 # --- Structured provider-format rules, matched against the variable VALUE.
 #     Hashtables (not [pscustomobject]) for Constrained Language Mode safety.
@@ -102,8 +102,11 @@ $script:Rules = @(
 
 # Placeholder / reference values to ignore (matched against the value only).
 $script:PlaceholderPatterns = @(
-    'your[-_ ]?', 'changeme', 'example', 'x{4,}', '\*{3,}', '<[^>]+>',
-    '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}'
+    '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}', '<[^>]+>',
+    '\*{3,}', 'x{6,}',
+    '^your[-_ ]', '^changeme', '^change-me', '^example', '^sample', '^placeholder',
+    '^redacted', '^dummy', '^fakekey', '^test$', '^none$', '^null$', '^todo', '^tbd', '^xxx',
+    '^[\*xX._\-]{4,}$', '(.)\1{9,}'
 )
 
 # Secret-keyword matching on the variable NAME. Distinctive keywords as plain

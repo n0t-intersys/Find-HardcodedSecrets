@@ -90,7 +90,7 @@ $ScriptVersion = '1.0.0'
 # Shared detection-rule generation (see suite note); bump in ALL
 # Find-*Secrets.ps1 / Detect-*Secrets.ps1 when rules / TriggerPattern /
 # placeholders change. Canonical: Find-HardcodedSecrets.ps1.
-$RulesRev = '2'
+$RulesRev = '3'
 
 # ===========================================================================
 # Detection rules (identical to Find-UserProfileSecrets.ps1; kept in sync by
@@ -117,16 +117,48 @@ $script:Rules = @(
     @{ Id = 'TWILIO_AC';        Label = 'Twilio Account SID';                  Pattern = '\bAC[0-9a-f]{32}\b';                                           CaseSensitive = $true;  Confidence = 'Medium'; Type = 'Structured' }
     @{ Id = 'MAILGUN_KEY';      Label = 'Mailgun API key';                     Pattern = '\bkey-[0-9a-f]{32}\b';                                         CaseSensitive = $true;  Confidence = 'Medium'; Type = 'Structured' }
     @{ Id = 'URL_CRED';         Label = 'URL with embedded credentials';       Pattern = '(?i)[a-z][a-z0-9+.\-]*://[^:/?#\s@]+:[^@/?#\s]{2,}@';           CaseSensitive = $false; Confidence = 'High';   Type = 'Structured' }
-    @{ Id = 'GEN_PASSWORD';     Label = 'Password assignment';                 Pattern = '(password|passwd|pwd)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{4,})';  CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
-    @{ Id = 'GEN_SECRET';       Label = 'Secret/token/key assignment';         Pattern = '(api[_-]?key|secret|client[_-]?secret|access[_-]?key|access[_-]?token|auth[_-]?token|token)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{8,})'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GEN_PASSWORD';     Label = 'Password assignment';                 Pattern = '(password|passwd|passphrase|pwd)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{4,})';  CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GEN_SECRET';       Label = 'Secret/token/key assignment';         Pattern = '(api[_-]?key|access[_-]?key|secret[_-]?key|session[_-]?key|client[_-]?secret|app[_-]?secret|consumer[_-]?secret|secret|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|private[_-]?token|token)["'']?\s*[:=]\s*["'']?(?<val>[^"''\s,;>]{8,})'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'CONN_STRING';      Label = 'Connection string with credentials';  Pattern = '(connectionstring\s*=|<add[^>]+connectionstring\s*=)[^>]*\b(password|pwd)\s*=\s*(?<val>[^;"''>\s]+)'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    # --- Additional provider formats + structural rules (rev 3) ---
+    @{ Id = 'SHOPIFY_TOKEN';    Label = 'Shopify access token';                Pattern = '\b(shpat_|shpss_|shppa_|shpca_)[A-Za-z0-9]{32,}\b';            CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'DIGITALOCEAN_PAT'; Label = 'DigitalOcean token';                  Pattern = '\b(dop|doo|dor)_v1_[a-f0-9]{64}\b';                            CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'DOPPLER_TOKEN';    Label = 'Doppler token';                       Pattern = '\bdp\.(pt|st|ct|scim|audit|sa)\.[A-Za-z0-9]{40,44}\b';         CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'DATABRICKS_PAT';   Label = 'Databricks PAT';                      Pattern = '\bdapi[a-f0-9]{32}(-\d+)?\b';                                  CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'GRAFANA_TOKEN';    Label = 'Grafana service-account token';       Pattern = '\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b';                     CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'POSTMAN_KEY';      Label = 'Postman API key';                     Pattern = '\bPMAK-[A-Fa-f0-9]{24}-[A-Fa-f0-9]{34}\b';                    CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'FIGMA_TOKEN';      Label = 'Figma personal access token';         Pattern = '\bfigd_[A-Za-z0-9_-]{40,}\b';                                  CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'LINEAR_KEY';       Label = 'Linear API key';                      Pattern = '\blin_api_[A-Za-z0-9]{40,}\b';                                 CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'SENTRY_TOKEN';     Label = 'Sentry auth token';                   Pattern = '\bsntry[su]_[A-Za-z0-9._-]{40,}\b';                            CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'PYPI_TOKEN';       Label = 'PyPI upload token';                   Pattern = '\bpypi-AgEIcHlwaS[A-Za-z0-9_-]{50,}\b';                        CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'HUGGINGFACE_TOKEN';Label = 'Hugging Face token';                  Pattern = '\bhf_[A-Za-z0-9]{34,}\b';                                      CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'NEWRELIC_KEY';     Label = 'New Relic API key';                   Pattern = '\bNRAK-[A-Z0-9]{27}\b';                                        CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'NOTION_TOKEN';     Label = 'Notion integration token';            Pattern = '\bntn_[A-Za-z0-9]{40,}\b';                                     CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'SQUARE_TOKEN';     Label = 'Square OAuth token';                  Pattern = '\bsq0(atp|csp|idp)-[A-Za-z0-9_-]{22,}\b';                      CaseSensitive = $true;  Confidence = 'High';   Type = 'Structured' }
+    @{ Id = 'STRIPE_TEST';      Label = 'Stripe test/restricted key';          Pattern = '\b(sk|rk)_test_[0-9A-Za-z]{20,}\b';                            CaseSensitive = $true;  Confidence = 'Medium'; Type = 'Structured' }
+    @{ Id = 'BEARER_TOKEN';     Label = 'Authorization bearer token';          Pattern = '(?i)\bbearer\s+(?<val>[A-Za-z0-9._\-+/=]{16,})';               CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'XML_SECRET';       Label = 'XML element secret';                  Pattern = '<(password|passwd|pwd|secret|apikey|api[_-]?key|client[_-]?secret|token|connectionstring|accesskey|privatekey|passphrase)>\s*(?<val>[^<>\s]{4,})\s*</'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'XML_ADD_KV';       Label = 'XML add key/value secret';            Pattern = '<add\s+key\s*=\s*["''][^"'']*(password|pwd|secret|api[_-]?key|token|connectionstring|accountkey)[^"'']*["'']\s+value\s*=\s*["''](?<val>[^"'']{4,})["'']'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
 )
 
-$script:TriggerPattern = '(?i)(password|passwd|pwd|secret|api|access|auth|client|token|credential|connectionstring|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|://)'
+$script:TriggerPattern = '(?i)(password|passwd|passphrase|pwd|secret|api|access|auth|bearer|client|session|private|token|credential|connectionstring|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|_test_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|shpat_|shpss_|shppa_|shpca_|dop_v1|doo_v1|dor_v1|dp\.|dapi|glsa_|pmak-|figd_|lin_api_|sntry|pypi-|hf_|nrak-|ntn_|sq0|://)'
 
 $script:PlaceholderPatterns = @(
-    'your[-_ ]?', 'changeme', 'example', 'x{4,}', '\*{3,}', '<[^>]+>',
-    '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}'
+    '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}', '<[^>]+>',
+    '\*{3,}', 'x{6,}',
+    '^your[-_ ]', '^changeme', '^change-me', '^example', '^sample', '^placeholder',
+    '^redacted', '^dummy', '^fakekey', '^test$', '^none$', '^null$', '^todo', '^tbd', '^xxx',
+    '^[\*xX._\-]{4,}$', '(.)\1{9,}'
+)
+
+# Obvious non-secret values dropped from contextual matches (pure numbers,
+# booleans, file paths, integrity-hash prefixes). Real secrets never look like
+# these; keyword-anchoring already screens most noise, this trims the rest.
+$script:NoiseValuePatterns = @(
+    '^\d+$',
+    '^(true|false|null|none|nil|n/a|na|yes|no|enabled|disabled|on|off|default|localhost)$',
+    '^[A-Za-z]:[\\/]', '^\.{0,2}[\\/]', '^/[A-Za-z0-9._/-]*$',
+    '^sha\d{1,3}[-:]'
 )
 
 $script:ScanRoots          = $Roots
@@ -137,10 +169,12 @@ $script:ExcludePaths       = @($ExcludePaths | ForEach-Object { $_.ToLowerInvari
 $script:CandidateExt = @(
     '.env', '.config', '.json', '.yaml', '.yml', '.ini', '.toml', '.properties',
     '.conf', '.cfg', '.cnf', '.xml', '.ps1', '.psm1', '.psd1', '.bat', '.cmd',
-    '.sh', '.py', '.js', '.ts', '.tf', '.tfvars', '.txt', '.pem', '.key'
+    '.sh', '.py', '.js', '.ts', '.tf', '.tfvars', '.txt', '.pem', '.key',
+    '.sql', '.hcl', '.ovpn', '.rdp'
 )
 $script:CandidateName = @(
-    '.git-credentials', '.npmrc', '.netrc', '.pypirc', '.gitconfig', 'credentials'
+    '.git-credentials', '.npmrc', '.netrc', '_netrc', '.pypirc', '.gitconfig',
+    'credentials', '.pgpass', '.my.cnf', '.htpasswd', '.dockercfg', '.s3cfg', '.boto'
 )
 
 $script:ConfRank           = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
@@ -195,27 +229,77 @@ function Test-IsPlaceholder {
     return $false
 }
 
+function Test-IsNoiseValue {
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) { return $true }
+    foreach ($p in $script:NoiseValuePatterns) { if ($Value -match $p) { return $true } }
+    return $false
+}
+
 function Test-FileIsBinary {
+    # BOM-aware: a NUL byte alone no longer means "binary" -- UTF-16/UTF-32 text
+    # (very common on Windows: PowerShell Out-File, exported .config/.xml) is full
+    # of NULs but is real text we must scan. Treat known text BOMs and BOM-less
+    # UTF-16 (NULs on a single parity) as text; otherwise a NUL means binary.
     param([string]$Path)
     $bytes = Get-Content -LiteralPath $Path -Encoding Byte -TotalCount 8192 -ErrorAction Stop
     if ($null -eq $bytes) { return $false }
-    foreach ($b in $bytes) { if ($b -eq 0) { return $true } }
-    return $false
+    $n = $bytes.Count
+    if ($n -eq 0) { return $false }
+    if ($n -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) { return $false }
+    if ($n -ge 4 -and $bytes[0] -eq 255 -and $bytes[1] -eq 254 -and $bytes[2] -eq 0 -and $bytes[3] -eq 0) { return $false }
+    if ($n -ge 4 -and $bytes[0] -eq 0 -and $bytes[1] -eq 0 -and $bytes[2] -eq 254 -and $bytes[3] -eq 255) { return $false }
+    if ($n -ge 2 -and $bytes[0] -eq 255 -and $bytes[1] -eq 254) { return $false }
+    if ($n -ge 2 -and $bytes[0] -eq 254 -and $bytes[1] -eq 255) { return $false }
+    $nul = 0; $nulEven = 0; $nulOdd = 0
+    for ($i = 0; $i -lt $n; $i++) {
+        if ($bytes[$i] -eq 0) { $nul++; if (($i -band 1) -eq 0) { $nulEven++ } else { $nulOdd++ } }
+    }
+    if ($nul -eq 0) { return $false }
+    if (($nul * 5) -ge ($n * 2) -and ($nulEven -eq 0 -or $nulOdd -eq 0)) { return $false }
+    return $true
+}
+
+function Get-FileTextKind {
+    # Pick an explicit decoder for BOM-less UTF-16; 'bom' lets the reader auto-detect
+    # (handles BOM'd UTF-8/16/32 and plain ANSI/UTF-8).
+    param([byte[]]$Head, [int]$N)
+    if ($N -ge 2 -and $Head[0] -eq 239 -and $Head[1] -eq 187) { return 'bom' }
+    if ($N -ge 2 -and $Head[0] -eq 255 -and $Head[1] -eq 254) { return 'bom' }
+    if ($N -ge 2 -and $Head[0] -eq 254 -and $Head[1] -eq 255) { return 'bom' }
+    $nul = 0; $ev = 0; $od = 0
+    for ($i = 0; $i -lt $N; $i++) { if ($Head[$i] -eq 0) { $nul++; if (($i -band 1) -eq 0) { $ev++ } else { $od++ } } }
+    if ($nul -gt 0 -and ($nul * 5) -ge ($N * 2)) {
+        if ($od -gt 0 -and $ev -eq 0) { return 'utf16le' }
+        if ($ev -gt 0 -and $od -eq 0) { return 'utf16be' }
+    }
+    return 'bom'
 }
 
 function Read-FileLine {
     param([string]$Path)
+    $kind = 'bom'
+    try {
+        $head = Get-Content -LiteralPath $Path -Encoding Byte -TotalCount 512 -ErrorAction Stop
+        if ($head) { $kind = Get-FileTextKind -Head $head -N $head.Count }
+    } catch { $kind = 'bom' }
     if ($script:UseDotNetIO) {
         $fs = $null; $sr = $null
         try {
             $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-            $sr = New-Object System.IO.StreamReader -ArgumentList @($fs, $true)
+            if ($kind -eq 'utf16le') { $enc = New-Object System.Text.UnicodeEncoding($false, $false); $sr = New-Object System.IO.StreamReader -ArgumentList @($fs, $enc, $false) }
+            elseif ($kind -eq 'utf16be') { $enc = New-Object System.Text.UnicodeEncoding($true, $false); $sr = New-Object System.IO.StreamReader -ArgumentList @($fs, $enc, $false) }
+            else { $sr = New-Object System.IO.StreamReader -ArgumentList @($fs, $true) }
             $text = $sr.ReadToEnd()
         }
         finally { if ($sr) { $sr.Dispose() } elseif ($fs) { $fs.Dispose() } }
         return [string[]]($text -split "`r`n|`n|`r")
     }
-    else { return @(Get-Content -LiteralPath $Path -ErrorAction Stop) }
+    else {
+        if ($kind -eq 'utf16le') { return @(Get-Content -LiteralPath $Path -Encoding Unicode -ErrorAction Stop) }
+        elseif ($kind -eq 'utf16be') { return @(Get-Content -LiteralPath $Path -Encoding BigEndianUnicode -ErrorAction Stop) }
+        else { return @(Get-Content -LiteralPath $Path -ErrorAction Stop) }
+    }
 }
 
 function Invoke-FileScan {
@@ -265,7 +349,7 @@ function Invoke-FileScan {
             if ($rule.Type -eq 'Contextual') {
                 $val = ''
                 if ($matches.Contains('val')) { $val = [string]$matches['val'] }
-                if (-not $script:IncludePlaceholders) { if (Test-IsPlaceholder -Value $val) { continue } }
+                if (-not $script:IncludePlaceholders) { if (Test-IsPlaceholder -Value $val) { continue } if (Test-IsNoiseValue -Value $val) { continue } }
             }
 
             $conf = $rule.Confidence

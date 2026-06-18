@@ -70,7 +70,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptVersion = '1.0.1'
 # Shared detection-rule generation (see suite note); bump in ALL Find-*Secrets.ps1
 # / Detect-*Secrets.ps1 when rules change. Canonical: Find-HardcodedSecrets.ps1.
-$RulesRev = '2'
+$RulesRev = '3'
 
 # --- Structured provider-format rules, matched against the variable VALUE
 #     (identical to Find-EnvVarSecrets.ps1; kept in sync via the drift guard). ---
@@ -98,8 +98,11 @@ $script:Rules = @(
 )
 
 $script:PlaceholderPatterns = @(
-    'your[-_ ]?', 'changeme', 'example', 'x{4,}', '\*{3,}', '<[^>]+>',
-    '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}'
+    '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}', '<[^>]+>',
+    '\*{3,}', 'x{6,}',
+    '^your[-_ ]', '^changeme', '^change-me', '^example', '^sample', '^placeholder',
+    '^redacted', '^dummy', '^fakekey', '^test$', '^none$', '^null$', '^todo', '^tbd', '^xxx',
+    '^[\*xX._\-]{4,}$', '(.)\1{9,}'
 )
 
 $script:EnvNameKeywordPattern = '(?i)(password|passwd|pwd|secret|api[_-]?key|apikey|access[_-]?key|secret[_-]?key|client[_-]?secret|auth[_-]?token|token|account[_-]?key|connection[_-]?string|connectionstring|private[_-]?key|credential|passphrase|bearer|webhook|oauth)'
