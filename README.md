@@ -111,20 +111,26 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 
 For scanning the whole fleet, use the **`intune/Detect-*Secrets.ps1`** scripts as **Remediations detection scripts** (Devices → *Scripts and remediations*). Unlike Intune *platform* scripts — which only report success/failure and bury stdout in the per-device IME log — a Remediation surfaces the detection script's output in the portal ("Pre-remediation detection output").
 
-| Detection script | Scans | Use as |
-|---|---|---|
-| **`intune/Detect-EnvVarSecrets.ps1`** | Environment variables (registry, all loaded hives) | Remediation #1 — instant |
-| **`intune/Detect-CredentialFileSecrets.ps1`** | Well-known dev/CLI credential files under `C:\Users` (`.git-credentials`, `.npmrc`, `.netrc`, `.aws\credentials`, `.docker\config.json`, `.ssh` private keys, cloud-CLI token caches, shell history, …) | Remediation #2 — fast, high-signal |
-| **`intune/Detect-UserProfileSecrets.ps1`** | Secret-bearing files under `C:\Users` — `.env`, `.config`, and common config/code/text types (`.json`, `.yml`, `.ini`, `.xml`, `.ps1`, `.py`, `.js`, `.txt`, …) | Remediation #3 — broad file sweep |
+The **five** detection scripts are **split by location** so each finishes well under Intune's ~30-minute kill, while **together they cover the entire system drive (C:)**. Deploy each as its own remediation; the union is a full-machine secret sweep that never risks a mid-scan timeout.
 
-- **Settings (all):** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script defaults are the config. Upload the **whole file** (browse to it — don't paste, which can truncate to just the comment header and produce empty output / a false "clean").
+| # | Detection script | Covers | Speed |
+|---|---|---|---|
+| 1 | **`intune/Detect-EnvVarSecrets.ps1`** | Environment variables — registry, System + every loaded user hive | Seconds |
+| 2 | **`intune/Detect-CredentialFileSecrets.ps1`** | Known dev/CLI credential files per profile (`.git-credentials`, `.npmrc`, `.netrc`, `.aws\credentials`, `.docker\config.json`, `.ssh` private keys, cloud-CLI token caches, shell history, …) | Seconds |
+| 3 | **`intune/Detect-UserProfileSecrets.ps1`** | `C:\Users` — all secret-bearing file types (config/code/text/secrets) | Bounded (20-min budget) |
+| 4 | **`intune/Detect-ServerConfigSecrets.ps1`** | `C:\ProgramData`, IIS (`inetpub`, `applicationHost.config`), .NET Framework machine/root config | Bounded (20-min budget) |
+| 5 | **`intune/Detect-ProgramFilesSecrets.ps1`** | `C:\Program Files`, `C:\Program Files (x86)`, **and auto-discovered custom top-level `C:\` folders** (e.g. `C:\apps`, `C:\git`, vendor dirs) | Bounded (20-min budget) |
+
+**How the five partition C:** `C:\Users` → #3 · `C:\ProgramData` + IIS + .NET config → #4 · `C:\Program Files*` + every other non-system top-level `C:\` folder → #5 · known credential files & env vars → #1/#2. Only `C:\Windows` bulk is skipped (OS files, no user secrets — its secret-bearing config dirs *are* covered by #4). Script #5 auto-discovers custom roots and scans them **first** (small + high-yield), so a large `Program Files` tree never starves them if the budget is hit.
+
+- **Settings (all five):** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script defaults are the config. Upload the **whole file** (browse to it — don't paste, which can truncate to just the comment header and produce empty output / a false "clean").
 - **Behavior:** each script **exits 1** when secrets are found (device flagged "issue detected") and **0** when clean. Intune Remediations surface only the **last** stdout line, so the whole report is packed onto **one line** (verdict + counts + findings inline), capped under ~2 KB:
   ```text
-  STATUS=FOUND | host=PC123 ver=1.0.1 n=3 high=1 med=2 low=0 scopes=2 rev=1 :: HIGH AWS_AKID User:sean.kennedy::AWS_ACCESS_KEY_ID(20) ; MED ENV_NAMED_SECRET User:sean.kennedy::BRIVO_PASSWORD(13) ; ...
-  STATUS=FOUND | host=PC123 ver=1.0.0 n=4 high=1 med=3 low=0 files=2 scanned=3 trunc=0 rev=1 :: HIGH AWS_AKID C:\Users\sean\app\.env:1 ; MED GEN_PASSWORD C:\Users\sean\app\.env:2 ; ...
+  STATUS=FOUND | host=PC123 ver=1.0.1 n=3 high=1 med=2 low=0 scopes=2 rev=3 :: HIGH AWS_AKID User:sean.kennedy::AWS_ACCESS_KEY_ID(20) ; MED ENV_NAMED_SECRET User:sean.kennedy::BRIVO_PASSWORD(13) ; ...
+  STATUS=FOUND | host=PC123 ver=1.0.0 n=4 high=1 med=3 low=0 files=2 scanned=3 trunc=0 rev=3 :: HIGH AWS_AKID C:\inetpub\app\web.config:1 ; MED GEN_PASSWORD C:\ProgramData\svc\app.config:2 ; ...
   ```
-  (or `STATUS=CLEAN …` / `STATUS=ERROR …`). They never print the secret value — only the location (scope+name, or path:line). The file scanner adds `trunc=1` if its time budget was hit (partial results); for full per-finding detail run the matching `Find-*Secrets.ps1` via Live Response on a flagged device.
-- **Note:** Intune (and the IME) terminate scripts after ~30 minutes, so the full-disk `Find-HardcodedSecrets.ps1` is a poor fit for Intune. The env detection runs in seconds; the credential-file detector probes a fixed list of known paths (also seconds); the user-profile sweep is bounded (default 10-min budget, `trunc=1` if hit). The credential-file and user-profile detectors are complementary: the former uniquely catches formats the recursive sweep misses (space-delimited `.netrc` passwords, Docker `"auth"`, `.npmrc _auth=`, `.ssh` private keys), while the latter covers arbitrary config/code/text files anywhere in the profile. Shared detection rules are kept in sync with the matching `Find-*Secrets.ps1` by the drift guard.
+  (or `STATUS=CLEAN …` / `STATUS=ERROR …`). They never print the secret value — only the location (scope+name, or path:line). The file scanners set `trunc=1` if the time budget was hit (partial results — rerun is cheap, or raise `-MaxRuntimeMinutes` if you have headroom under the 30-min kill).
+- **Why split, not one full-disk script:** Intune (and the IME) terminate scripts after ~30 minutes. A single whole-C: scan can exceed that on a large/dev machine and get killed with **no output** — so it would catch *less*, not more. Splitting by location keeps every remediation comfortably in-budget while the set still reaches every secret-bearing corner of C:. Detection rules / TriggerPattern / placeholders are the shared suite set (rev 3), kept byte-identical across all scripts by `tools\Test-SuiteConsistency.ps1`. For full per-finding detail (incl. SHA-256) on a flagged device, run the matching `Find-*Secrets.ps1` via Live Response.
 
 ## Parameters
 

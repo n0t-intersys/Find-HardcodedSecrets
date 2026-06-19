@@ -1,35 +1,54 @@
 <#
 .SYNOPSIS
-    Microsoft Intune REMEDIATION DETECTION script. Read-only scan of user-profile
-    files (C:\Users by default) for .env / .config files containing hardcoded
-    secrets. Exits 1 when secrets are found (device flagged "issue detected"),
-    0 when clean. Emits a compact, single-line report sized to survive Intune's
-    ~2 KB detection-output cap. Never prints the secret value.
+    Microsoft Intune REMEDIATION DETECTION script. Read-only scan of installed-app
+    and custom directories on C: -- Program Files, Program Files (x86), and any
+    NON-standard top-level C:\ folders (e.g. C:\apps, C:\git, C:\tools, a vendor
+    app dir) -- for hardcoded secrets. Exits 1 when secrets are found (device
+    flagged "issue detected"), 0 when clean. One compact stdout line. Never the value.
 
 .DESCRIPTION
-    Companion to Detect-EnvVarSecrets.ps1 for FILE-based secrets. Intune use:
-    Devices -> Scripts and remediations -> create a remediation, use THIS as the
-    detection script. Recommended settings: Run as SYSTEM, 64-bit, signature
-    check off. Intune passes no arguments, so the defaults are the operative
-    config; Intune surfaces only the LAST stdout line, so the whole report is on
-    ONE line (verdict + counts + findings inline), capped under ~2 KB.
+    Part of the Intune Detect-*Secrets.ps1 set, split BY LOCATION so each
+    remediation finishes well under Intune's ~30-min kill while together covering
+    the whole system drive:
+      * Detect-EnvVarSecrets.ps1         -- environment variables (registry)
+      * Detect-UserProfileSecrets.ps1    -- C:\Users
+      * Detect-CredentialFileSecrets.ps1 -- known per-profile credential files
+      * Detect-ServerConfigSecrets.ps1   -- ProgramData + IIS + .NET config
+      * Detect-ProgramFilesSecrets.ps1   -- THIS: Program Files + custom C: roots
 
-    Detection logic / rules are identical to Find-UserProfileSecrets.ps1 (kept in
-    sync by tools\Test-SuiteConsistency.ps1). Read-only; opens files shared
-    read/write; skips reparse points and cloud/offline placeholders (no OneDrive
-    hydration); Windows PowerShell 5.1; tolerant of Constrained Language Mode.
+    This one is the catch-all for the rest of C:. It scans Program Files and
+    Program Files (x86), plus it AUTO-DISCOVERS other top-level C:\ directories
+    that the other scanners do not cover (anything that is not Windows, Users,
+    ProgramData, Program Files*, inetpub, or a system/recovery folder) -- this is
+    where custom app installs and developer repos at C:\ root live. Custom roots
+    are scanned FIRST (they are small and high-yield) so if the time budget is
+    hit on a large Program Files tree they are never sacrificed.
+
+    Intune use: Devices -> Scripts and remediations -> create a remediation, use
+    THIS as the detection script. Recommended settings: Run as SYSTEM, 64-bit,
+    signature check off. Intune passes no arguments, so the defaults are the
+    operative config; it surfaces only the LAST stdout line, so the whole report
+    is on ONE line, capped under ~2 KB.
+
+    Detection rules / TriggerPattern / placeholders are the shared suite set
+    (rev 3; kept in sync by tools\Test-SuiteConsistency.ps1). BOM-aware
+    (UTF-16/UTF-32 text is scanned, not skipped). Read-only; opens files shared
+    read/write; skips reparse points and cloud/offline placeholders; Windows
+    PowerShell 5.1; tolerant of Constrained Language Mode.
 
     Output (single line):
       STATUS=FOUND | host=<h> ver=<v> n=<n> high=<a> med=<b> low=<c> files=<f> scanned=<s> trunc=<0|1> rev=<r> :: HIGH <RuleId> <path>:<line> ; MED ... [; (+N more)]
     or  STATUS=CLEAN | host=<h> ver=<v> n=0 scanned=<s> trunc=<0|1> rev=<r>
     or  STATUS=ERROR | host=<h> ver=<v> rev=<r> | msg=<...>   (exit 1)
-    trunc=1 means the file-scan time budget was hit -> results are PARTIAL. For
-    full per-finding detail (incl. SHA-256), run Find-UserProfileSecrets.ps1 via
-    Live Response on a flagged device.
+    trunc=1 means the time budget was hit -> results are PARTIAL.
 
 .PARAMETER Roots
-    Directories to scan. Default: C:\Users. (Intune can't pass args; for local
-    testing you can point this at a fixture folder.)
+    Base directories always scanned. Default: Program Files and Program Files
+    (x86). Custom top-level C:\ dirs are added automatically (see -SkipCustomRoots).
+
+.PARAMETER SkipCustomRoots
+    Switch. Do NOT auto-discover/scan non-standard top-level C:\ directories;
+    scan only -Roots. Off by default (custom roots ARE scanned).
 
 .PARAMETER MinConfidence
     Minimum confidence to report: High, Medium or Low. Default: Medium.
@@ -38,20 +57,16 @@
     Skip candidate files larger than this many megabytes. Default: 10.
 
 .PARAMETER MaxRuntimeMinutes
-    File-scan time budget in minutes. Default: 20 (well under Intune's ~30 min
-    kill). On exceed, the scan stops, reports partial results, and sets trunc=1.
+    Time budget in minutes. Default: 20 (well under Intune's ~30-min kill). On
+    exceed, the scan stops, reports partial results, and sets trunc=1.
     0 = unlimited (not recommended for Intune).
-
-.PARAMETER ExcludePaths
-    Case-insensitive path fragments to skip. Default: high-noise user-profile
-    caches (INetCache, AppData\Local\Packages, Explorer).
 
 .PARAMETER IncludePlaceholders
     Switch. Disable placeholder/reference filtering (e.g. ${VAR}, changeme).
 
 .EXAMPLE
     Local test:
-        powershell -ExecutionPolicy Bypass -File .\Detect-UserProfileSecrets.ps1 ; $LASTEXITCODE
+        powershell -ExecutionPolicy Bypass -File .\Detect-ProgramFilesSecrets.ps1 ; $LASTEXITCODE
 
 .NOTES
     Safety: read-only; writes nothing; never prints a secret value (path + line
@@ -64,7 +79,12 @@
 
 [CmdletBinding()]
 param(
-    [string[]]$Roots = @('C:\Users'),
+    [string[]]$Roots = @(
+        'C:\Program Files',
+        'C:\Program Files (x86)'
+    ),
+
+    [switch]$SkipCustomRoots,
 
     [ValidateSet('High', 'Medium', 'Low')]
     [string]$MinConfidence = 'Medium',
@@ -75,10 +95,7 @@ param(
 
     [string[]]$ExcludePaths = @(
         '\node_modules', '\.nuget\packages', '\site-packages', '\__pycache__',
-        '\.gradle', '\.cargo', '\.terraform', '\.vscode\extensions',
-        '\AppData\Local\Microsoft\Windows\INetCache',
-        '\AppData\Local\Packages',
-        '\AppData\Local\Microsoft\Windows\Explorer'
+        '\.gradle', '\.cargo', '\.terraform', '\.vscode\extensions'
     ),
 
     [switch]$IncludePlaceholders
@@ -93,7 +110,7 @@ $ScriptVersion = '1.0.0'
 $RulesRev = '3'
 
 # ===========================================================================
-# Detection rules (identical to Find-UserProfileSecrets.ps1; kept in sync by
+# Detection rules (identical to the suite; kept in sync by
 # tools\Test-SuiteConsistency.ps1). Hashtables for Constrained Language Mode.
 # ===========================================================================
 $script:Rules = @(
@@ -164,7 +181,7 @@ $script:NoiseValuePatterns = @(
 $script:ScanRoots          = $Roots
 $script:ExcludePaths       = @($ExcludePaths | ForEach-Object { $_.ToLowerInvariant() })   # pre-lowered for Test-ExcludeDir
 
-# Candidate selection (broad: user profiles stash secrets in many file types).
+# Candidate selection (broad: secrets live in many file types, not just .config).
 # Extensions checked via String.EndsWith (CLM-safe; [System.IO.Path] is CLM-blocked).
 $script:CandidateExt = @(
     '.env', '.config', '.json', '.yaml', '.yml', '.ini', '.toml', '.properties',
@@ -198,7 +215,7 @@ $script:DirErrors         = 0
 $script:ReparseSkipped    = 0
 
 # ===========================================================================
-# Helpers (mirror Find-UserProfileSecrets.ps1; no inline output -- collect only)
+# Helpers (mirror the suite; no inline output -- collect only)
 # ===========================================================================
 
 function Test-ExcludeDir {
@@ -394,7 +411,7 @@ function Invoke-DirScan {
 }
 
 # ===========================================================================
-# Main -- scan, then emit ONE summary line and set the exit code.
+# Main -- scan custom roots first, then Program Files; emit ONE summary line.
 # ===========================================================================
 
 $script:StartLocal = Get-Date
@@ -402,7 +419,30 @@ $script:UseDotNetIO = ($ExecutionContext.SessionState.LanguageMode -eq 'FullLang
 
 $err = $null
 try {
-    foreach ($root in $script:ScanRoots) {
+    $rootsToScan = @()
+    if (-not $SkipCustomRoots) {
+        # Non-standard top-level C:\ folders not covered by the other Detect-*
+        # scripts (custom app installs, repos, tool dirs). Scanned FIRST.
+        $known = @(
+            'windows', 'users', 'programdata', 'program files', 'program files (x86)',
+            '$recycle.bin', 'system volume information', 'recovery', 'perflogs',
+            '$winreagent', 'msocache', 'config.msi', 'documents and settings',
+            'inetpub', 'windows.old', 'onedrivetemp', '$getcurrent', 'intel'
+        )
+        try {
+            $top = @(Get-ChildItem -LiteralPath 'C:\' -Directory -Force -ErrorAction SilentlyContinue)
+            foreach ($d in $top) {
+                if ((([int]$d.Attributes) -band 0x400) -ne 0) { continue }   # reparse / junction
+                if ($known -contains $d.Name.ToLowerInvariant()) { continue }
+                $rootsToScan += $d.FullName
+            }
+        }
+        catch { $script:DirErrors++ }
+    }
+    $rootsToScan += $script:ScanRoots
+    $rootsToScan = @($rootsToScan | Select-Object -Unique)
+
+    foreach ($root in $rootsToScan) {
         if ($script:TimeUp) { break }
         if (-not (Test-Path -LiteralPath $root -PathType Container)) { continue }
         Invoke-DirScan -Dir $root
