@@ -86,7 +86,7 @@ $ScriptVersion = '1.0.0'
 # Shared detection-rule generation (see suite note); bump in ALL
 # Find-*Secrets.ps1 / Detect-*Secrets.ps1 when rules / TriggerPattern /
 # placeholders change. Canonical: Find-HardcodedSecrets.ps1.
-$RulesRev = '3'
+$RulesRev = '4'
 
 # ===========================================================================
 # Detection rules. The first block is the shared suite set (identical to
@@ -139,6 +139,8 @@ $script:Rules = @(
     @{ Id = 'BEARER_TOKEN';     Label = 'Authorization bearer token';          Pattern = '(?i)\bbearer\s+(?<val>[A-Za-z0-9._\-+/=]{16,})';               CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'XML_SECRET';       Label = 'XML element secret';                  Pattern = '<(password|passwd|pwd|secret|apikey|api[_-]?key|client[_-]?secret|token|connectionstring|accesskey|privatekey|passphrase)>\s*(?<val>[^<>\s]{4,})\s*</'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'XML_ADD_KV';       Label = 'XML add key/value secret';            Pattern = '<add\s+key\s*=\s*["''][^"'']*(password|pwd|secret|api[_-]?key|token|connectionstring|accountkey)[^"'']*["'']\s+value\s*=\s*["''](?<val>[^"'']{4,})["'']'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GPP_CPASSWORD';    Label = 'Group Policy Preferences cpassword';   Pattern = 'cpassword\s*=\s*["''](?<val>[^"''\s]{4,})["'']'; CaseSensitive = $false; Confidence = 'High';   Type = 'Contextual' }
+    @{ Id = 'UNATTEND_PW';      Label = 'Unattend/sysprep password';            Pattern = '<\w*password>\s*<value>(?<val>[^<\s]{4,})'; CaseSensitive = $false; Confidence = 'High';   Type = 'Contextual' }
     # --- Credential-file-specific (unique to this script; formats the generic
     #     keyword=value rules don't catch). Not part of the shared drift check. ---
     @{ Id = 'NETRC_PW';         Label = 'netrc/login password (space-delimited)'; Pattern = '(?i)\b(password|passwd)\s+(?<val>[^\s]{4,})';                CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
@@ -149,7 +151,7 @@ $script:Rules = @(
 # Pre-filter gate: strict SUPERSET of every rule trigger (shared set already
 # covers 'password' and 'auth', which the credential-file rules key on). Lines
 # with no trigger skip the per-rule loop. Broaden (never narrow) when adding rules.
-$script:TriggerPattern = '(?i)(password|passwd|passphrase|pwd|secret|api|access|auth|bearer|client|session|private|token|credential|connectionstring|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|_test_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|shpat_|shpss_|shppa_|shpca_|dop_v1|doo_v1|dor_v1|dp\.|dapi|glsa_|pmak-|figd_|lin_api_|sntry|pypi-|hf_|nrak-|ntn_|sq0|://)'
+$script:TriggerPattern = '(?i)(password|passwd|passphrase|pwd|secret|api|access|auth|bearer|client|session|private|token|credential|connectionstring|cpassword|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|_test_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|shpat_|shpss_|shppa_|shpca_|dop_v1|doo_v1|dor_v1|dp\.|dapi|glsa_|pmak-|figd_|lin_api_|sntry|pypi-|hf_|nrak-|ntn_|sq0|://)'
 
 $script:PlaceholderPatterns = @(
     '\$\{[^}]+\}', '%[^%]+%', '\{\{[^}]+\}\}', '\$\([^)]+\)', '#\{[^}]+\}', '<[^>]+>',

@@ -170,7 +170,7 @@ $ScriptVersion = '1.6.1'
 # Detection-rule generation shared across the Find-*Secrets.ps1 suite (this is the
 # canonical rule set). Bump in ALL of them whenever the rules / TriggerPattern /
 # placeholder list change, so an analyst can confirm they carry the same generation.
-$RulesRev = '3'
+$RulesRev = '4'
 
 # ---------------------------------------------------------------------------
 # Detection rules.
@@ -254,6 +254,8 @@ $script:Rules = @(
     @{ Id = 'BEARER_TOKEN';     Label = 'Authorization bearer token';          Pattern = '(?i)\bbearer\s+(?<val>[A-Za-z0-9._\-+/=]{16,})';               CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'XML_SECRET';       Label = 'XML element secret';                  Pattern = '<(password|passwd|pwd|secret|apikey|api[_-]?key|client[_-]?secret|token|connectionstring|accesskey|privatekey|passphrase)>\s*(?<val>[^<>\s]{4,})\s*</'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
     @{ Id = 'XML_ADD_KV';       Label = 'XML add key/value secret';            Pattern = '<add\s+key\s*=\s*["''][^"'']*(password|pwd|secret|api[_-]?key|token|connectionstring|accountkey)[^"'']*["'']\s+value\s*=\s*["''](?<val>[^"'']{4,})["'']'; CaseSensitive = $false; Confidence = 'Medium'; Type = 'Contextual' }
+    @{ Id = 'GPP_CPASSWORD';    Label = 'Group Policy Preferences cpassword';   Pattern = 'cpassword\s*=\s*["''](?<val>[^"''\s]{4,})["'']'; CaseSensitive = $false; Confidence = 'High';   Type = 'Contextual' }
+    @{ Id = 'UNATTEND_PW';      Label = 'Unattend/sysprep password';            Pattern = '<\w*password>\s*<value>(?<val>[^<\s]{4,})'; CaseSensitive = $false; Confidence = 'High';   Type = 'Contextual' }
 )
 
 # ---------------------------------------------------------------------------
@@ -305,7 +307,7 @@ $script:EnvNameKeywordBounded = '(?i)(^|[_\-])(pwd|key|keys|cert|certificate|pat
 # skipped. It is always safe to make this BROADER (over-include); only too-narrow
 # is dangerous. (Validated against a line matching every current rule.)
 # ---------------------------------------------------------------------------
-$script:TriggerPattern = '(?i)(password|passwd|passphrase|pwd|secret|api|access|auth|bearer|client|session|private|token|credential|connectionstring|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|_test_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|shpat_|shpss_|shppa_|shpca_|dop_v1|doo_v1|dor_v1|dp\.|dapi|glsa_|pmak-|figd_|lin_api_|sntry|pypi-|hf_|nrak-|ntn_|sq0|://)'
+$script:TriggerPattern = '(?i)(password|passwd|passphrase|pwd|secret|api|access|auth|bearer|client|session|private|token|credential|connectionstring|cpassword|akia|asia|aiza|googleusercontent|xox|gh[pousr]_|glpat-|_live_|_test_|sg\.|begin|eyj|accountkey=|\bsk|npm_|github_pat_|q~|hooks\.slack|\bac[0-9a-f]|key-|shpat_|shpss_|shppa_|shpca_|dop_v1|doo_v1|dor_v1|dp\.|dapi|glsa_|pmak-|figd_|lin_api_|sntry|pypi-|hf_|nrak-|ntn_|sq0|://)'
 
 # Confidence ranking for -MinConfidence filtering.
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }

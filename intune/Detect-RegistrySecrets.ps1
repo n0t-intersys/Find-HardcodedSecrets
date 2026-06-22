@@ -105,7 +105,7 @@ $ErrorActionPreference = 'Stop'
 $ScriptVersion = '1.0.0'
 # Shared detection-rule generation (see suite note); bump in ALL Find-*Secrets.ps1
 # / Detect-*Secrets.ps1 when rules change. Canonical: Find-HardcodedSecrets.ps1.
-$RulesRev = '3'
+$RulesRev = '4'
 
 # --- Structured provider-format rules, matched against value DATA (identical to
 #     the env-var scanner; kept in sync via the drift guard). ---

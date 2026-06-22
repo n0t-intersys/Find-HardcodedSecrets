@@ -25,6 +25,12 @@
       * BROWSER_PWD_STORE   -- presence of Chrome/Edge "Login Data" and Firefox
                                logins.json per user profile (DPAPI-encrypted saved
                                passwords exist). Medium.
+      * VAULT_FILE          -- password-manager / key-store files (.kdbx, .pfx,
+                               .jks, .ppk, .p12, ...) in common user folders. Medium.
+      * SERVICE_CRED        -- Windows service command lines with an embedded
+                               credential (/password:, --secret=, ...). Medium.
+      * TASK_CRED           -- scheduled-task action command lines with an
+                               embedded credential. Medium.
 
     Intune use: Devices -> Scripts and remediations -> create a remediation, use
     THIS as the detection script. Recommended: Run as SYSTEM, 64-bit, signature
@@ -72,11 +78,17 @@ $ErrorActionPreference = 'Stop'
 $ScriptVersion = '1.0.0'
 # Carries the shared generation tag so the drift guard treats it as part of the
 # suite (this detector uses no regex rule table -- it inventories OS stores).
-$RulesRev = '3'
+$RulesRev = '4'
 
 $script:ConfRank = @{ 'High' = 3; 'Medium' = 2; 'Low' = 1 }
 $script:MinRank  = $script:ConfRank[$MinConfidence]
 $script:Findings = @()
+
+# Credential passed on a service/task command line (e.g. /password:x, --secret=y).
+$script:CmdCredPattern = '(?i)[/-]{1,2}(password|passwd|pwd|secret|api[_-]?key|apikey|token|access[_-]?key)[ :=]+\S{3,}'
+# Password-manager / key-store vault files (binary: detected by presence, not content).
+$script:VaultExt = @('*.kdbx', '*.kdb', '*.psafe3', '*.opvault', '*.agilekeychain', '*.1pif', '*.pfx', '*.p12', '*.jks', '*.keystore', '*.ppk')
+$script:VaultUserFolders = @('Desktop', 'Documents', 'Downloads', 'AppData\Roaming')
 
 function Add-Finding {
     param([string]$Confidence, [string]$RuleId, [string]$Scope, [string]$Name, [int]$Length)
@@ -164,16 +176,79 @@ function Invoke-BrowserCheck {
     }
 }
 
+# --- Password-manager / key-store vault files (presence) -----------------------
+function Invoke-VaultFileCheck {
+    $users = @()
+    try { $users = @(Get-ChildItem -LiteralPath 'C:\Users' -Directory -Force -ErrorAction SilentlyContinue) } catch { $users = @() }
+    foreach ($u in $users) {
+        if ((([int]$u.Attributes) -band 0x400) -ne 0) { continue }   # reparse / junction
+        foreach ($sub in $script:VaultUserFolders) {
+            $folder = Join-Path $u.FullName $sub
+            if (-not (Test-Path -LiteralPath $folder -PathType Container -ErrorAction SilentlyContinue)) { continue }
+            $hits = $null
+            try { $hits = @(Get-ChildItem -Path $folder -Recurse -Depth 4 -File -Force -Include $script:VaultExt -ErrorAction SilentlyContinue) } catch { $hits = @() }
+            foreach ($h in $hits) {
+                $sz = 0
+                try { $sz = [int]$h.Length } catch { $sz = 0 }
+                Add-Finding -Confidence 'Medium' -RuleId 'VAULT_FILE' -Scope ('Vault:' + $u.Name) -Name $h.Name -Length $sz
+            }
+        }
+    }
+}
+
+# --- Service command lines with embedded credentials ---------------------------
+function Invoke-ServiceCheck {
+    $svcs = $null
+    try { $svcs = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop) } catch { return }
+    foreach ($s in $svcs) {
+        $pn = ''
+        try { $pn = [string]$s.PathName } catch { $pn = '' }
+        if ([string]::IsNullOrEmpty($pn)) { continue }
+        if ($pn -match $script:CmdCredPattern) {
+            $nm = ''
+            try { $nm = [string]$s.Name } catch { $nm = '' }
+            Add-Finding -Confidence 'Medium' -RuleId 'SERVICE_CRED' -Scope 'Service' -Name $nm -Length 0
+        }
+    }
+}
+
+# --- Scheduled-task action command lines with embedded credentials -------------
+function Invoke-TaskCheck {
+    $tasks = $null
+    try { $tasks = @(Get-ScheduledTask -ErrorAction Stop) } catch { return }
+    foreach ($t in $tasks) {
+        $actions = @()
+        try { $actions = @($t.Actions) } catch { $actions = @() }
+        foreach ($a in $actions) {
+            $targ = ''; $texe = ''
+            try { $targ = [string]$a.Arguments } catch { $targ = '' }
+            try { $texe = [string]$a.Execute }   catch { $texe = '' }
+            if (($texe + ' ' + $targ) -match $script:CmdCredPattern) {
+                $tn = ''
+                try { $tn = [string]$t.TaskName } catch { $tn = '' }
+                Add-Finding -Confidence 'Medium' -RuleId 'TASK_CRED' -Scope 'SchedTask' -Name $tn -Length 0
+                break
+            }
+        }
+    }
+}
+
 # ===========================================================================
 # Main
 # ===========================================================================
 
 $err = $null
 try {
-    if (-not $SkipWifi) { Invoke-WifiCheck }
-    Invoke-CredManagerCheck
-    Invoke-CertCheck
-    Invoke-BrowserCheck
+    # Each source is best-effort and independently guarded: one source failing
+    # (e.g. access-denied enumerating tasks) must not abort the others or flip a
+    # real FOUND into ERROR.
+    try { if (-not $SkipWifi) { Invoke-WifiCheck } } catch { $null = $_ }
+    try { Invoke-CredManagerCheck } catch { $null = $_ }
+    try { Invoke-CertCheck }        catch { $null = $_ }
+    try { Invoke-BrowserCheck }     catch { $null = $_ }
+    try { Invoke-VaultFileCheck }   catch { $null = $_ }
+    try { Invoke-ServiceCheck }     catch { $null = $_ }
+    try { Invoke-TaskCheck }        catch { $null = $_ }
 }
 catch { $err = $_.Exception.Message }
 
