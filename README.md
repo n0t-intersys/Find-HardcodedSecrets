@@ -111,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\Find-HardcodedSecrets.ps1 -Drives "C:
 
 For scanning the whole fleet, use the **`intune/Detect-*Secrets.ps1`** scripts as **Remediations detection scripts** (Devices → *Scripts and remediations*). Unlike Intune *platform* scripts — which only report success/failure and bury stdout in the per-device IME log — a Remediation surfaces the detection script's output in the portal ("Pre-remediation detection output").
 
-The **five** detection scripts are **split by location** so each finishes well under Intune's ~30-minute kill, while **together they cover the entire system drive (C:)**. Deploy each as its own remediation; the union is a full-machine secret sweep that never risks a mid-scan timeout.
+The **seven** detection scripts are **split by location / mechanism** so each finishes well under Intune's ~30-minute kill, while **together they cover the whole device** — every file on C:, environment variables, the registry, and OS/app credential stores. Deploy each as its own remediation; the union is a full-machine secret sweep that never risks a mid-scan timeout.
 
 | # | Detection script | Covers | Speed |
 |---|---|---|---|
@@ -120,10 +120,12 @@ The **five** detection scripts are **split by location** so each finishes well u
 | 3 | **`intune/Detect-UserProfileSecrets.ps1`** | `C:\Users` — all secret-bearing file types (config/code/text/secrets) | Bounded (20-min budget) |
 | 4 | **`intune/Detect-ServerConfigSecrets.ps1`** | `C:\ProgramData`, IIS (`inetpub`, `applicationHost.config`), .NET Framework machine/root config | Bounded (20-min budget) |
 | 5 | **`intune/Detect-ProgramFilesSecrets.ps1`** | `C:\Program Files`, `C:\Program Files (x86)`, **and auto-discovered custom top-level `C:\` folders** (e.g. `C:\apps`, `C:\git`, vendor dirs) | Bounded (20-min budget) |
+| 6 | **`intune/Detect-RegistrySecrets.ps1`** | **Registry** — Windows auto-logon password, PuTTY/WinSCP/VNC stored passwords, plus a broad sweep of value data under `HKLM\SOFTWARE` and each loaded user hive | Bounded (15-min budget) |
+| 7 | **`intune/Detect-StoredCredentialSecrets.ps1`** | **OS/app credential stores** — saved Wi-Fi PSKs (plaintext), Windows Credential Manager, certificate private keys, browser saved-password stores | Seconds |
 
-**How the five partition C:** `C:\Users` → #3 · `C:\ProgramData` + IIS + .NET config → #4 · `C:\Program Files*` + every other non-system top-level `C:\` folder → #5 · known credential files & env vars → #1/#2. Only `C:\Windows` bulk is skipped (OS files, no user secrets — its secret-bearing config dirs *are* covered by #4). Script #5 auto-discovers custom roots and scans them **first** (small + high-yield), so a large `Program Files` tree never starves them if the budget is hit.
+**How they divide the device:** *Files on C:* — `C:\Users` → #3 · `C:\ProgramData` + IIS + .NET config → #4 · `C:\Program Files*` + every other non-system top-level `C:\` folder → #5 (only `C:\Windows` bulk is skipped — OS files, no user secrets; its secret-bearing config dirs *are* covered by #4). Script #5 auto-discovers custom roots and scans them **first** (small + high-yield), so a large `Program Files` tree never starves them if the budget is hit. *Beyond files* — environment variables → #1 · known credential files → #2 · the registry → #6 · OS/app credential stores (Wi-Fi keys, Credential Manager, cert keys, browser stores) → #7. Scripts #6/#7 catch credentials that no file scan can see.
 
-- **Settings (all five):** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script defaults are the config. Upload the **whole file** (browse to it — don't paste, which can truncate to just the comment header and produce empty output / a false "clean").
+- **Settings (all seven):** run as **System** (not logged-on user), **64-bit**, signature check **off**. Intune passes no arguments, so the script defaults are the config. Upload the **whole file** (browse to it — don't paste, which can truncate to just the comment header and produce empty output / a false "clean").
 - **Behavior:** each script **exits 1** when secrets are found (device flagged "issue detected") and **0** when clean. Intune Remediations surface only the **last** stdout line, so the whole report is packed onto **one line** (verdict + counts + findings inline), capped under ~2 KB:
   ```text
   STATUS=FOUND | host=PC123 ver=1.0.1 n=3 high=1 med=2 low=0 scopes=2 rev=3 :: HIGH AWS_AKID User:sean.kennedy::AWS_ACCESS_KEY_ID(20) ; MED ENV_NAMED_SECRET User:sean.kennedy::BRIVO_PASSWORD(13) ; ...
